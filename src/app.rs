@@ -55,7 +55,7 @@ enum WizardInput<T> {
 pub fn run_menu(paths: &AppPaths) -> Result<()> {
     loop {
         println!();
-        println!("emmc-lab");
+        println!("emmc-lab v{}", env!("CARGO_PKG_VERSION"));
         println!("1. New Test Run");
         println!("2. Run Saved Profile");
         println!("3. Diagnostic Mode - Live Monitor");

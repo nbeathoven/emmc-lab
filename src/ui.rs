@@ -59,7 +59,10 @@ impl Ui {
 
     fn banner(&self, title: &str) -> String {
         let mut out = String::new();
-        let line = "=".repeat(min(self.width, title.len().max(12)));
+        let utility = format!("emmc-lab v{}", env!("CARGO_PKG_VERSION"));
+        let line_width = title.len().max(utility.len()).max(12);
+        let line = "=".repeat(min(self.width, line_width));
+        let _ = writeln!(&mut out, "{}", self.paint(&utility, "1;33"));
         let _ = writeln!(&mut out, "{}", self.paint(title, "1;36"));
         let _ = writeln!(&mut out, "{}", self.paint(&line, "36"));
         out
