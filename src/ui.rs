@@ -22,6 +22,7 @@ struct Column<'a> {
 
 struct Ui {
     width: usize,
+    height: usize,
     color: bool,
 }
 
@@ -35,13 +36,25 @@ impl Ui {
             })
             .unwrap_or(100)
             .clamp(72, 160);
+        let height = stdout_height()
+            .or_else(|| {
+                env::var("LINES")
+                    .ok()
+                    .and_then(|value| value.parse::<usize>().ok())
+            })
+            .unwrap_or(40)
+            .clamp(20, 80);
         let no_color = env::var_os("NO_COLOR").is_some();
         let term = env::var("TERM").unwrap_or_default();
         let color = !no_color
             && !term.is_empty()
             && term != "dumb"
             && unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 };
-        Self { width, color }
+        Self {
+            width,
+            height,
+            color,
+        }
     }
 
     fn banner(&self, title: &str) -> String {
@@ -892,6 +905,8 @@ pub fn render_live_monitor(
 ) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB LIVE MONITOR");
+    let compact = ui.height <= 28;
+    let medium = ui.height <= 40;
     let overview_rows = vec![
         ("Updated".to_string(), report.ended_at.to_rfc3339()),
         (
@@ -930,10 +945,11 @@ pub fn render_live_monitor(
         ui.kv_table("Notes", &note_rows),
     ));
 
+    let process_limit = live_process_limit(ui.width, ui.height);
     let process_rows = report
         .top_processes
         .iter()
-        .take(row_limit(ui.width))
+        .take(process_limit)
         .map(|process| {
             vec![
                 process.pid.to_string(),
@@ -1006,10 +1022,23 @@ pub fn render_live_monitor(
         )
     };
 
+    if compact {
+        out.push_str(&process_panel);
+        out.push_str(&ui.note(
+            "Compact:",
+            "lower sections hidden on short screens; use a taller terminal or timed capture for full detail",
+        ));
+        out.push_str(&ui.note(
+            "Attribution:",
+            "best-effort procfs monitor; logical and storage bytes remain separate",
+        ));
+        return out;
+    }
+
     let device_rows = report
         .device_totals
         .iter()
-        .take(row_limit(ui.width))
+        .take(live_device_limit(ui.width, ui.height))
         .map(|device| {
             vec![
                 device.device.clone(),
@@ -1057,96 +1086,100 @@ pub fn render_live_monitor(
         out.push_str(&ui.pair(process_panel, device_panel));
     }
 
-    let path_rows = report
-        .top_processes
-        .iter()
-        .take(row_limit(ui.width))
-        .map(|process| {
-            vec![
-                process.pid.to_string(),
-                process.exe_path.clone(),
-                process.cwd.clone(),
-                process.hottest_file.clone(),
-            ]
-        })
-        .collect::<Vec<_>>();
-    if !path_rows.is_empty() {
-        out.push_str(&ui.table(
-            "Process Paths",
-            &[
-                Column {
-                    header: "PID",
-                    min: 5,
-                    max: 7,
-                    align: Align::Right,
-                },
-                Column {
-                    header: "Executable",
-                    min: 14,
-                    max: 28,
-                    align: Align::Left,
-                },
-                Column {
-                    header: "CWD",
-                    min: 14,
-                    max: 24,
-                    align: Align::Left,
-                },
-                Column {
-                    header: "Hottest File",
-                    min: 14,
-                    max: 28,
-                    align: Align::Left,
-                },
-            ],
-            &path_rows,
-        ));
+    if !medium {
+        let path_rows = report
+            .top_processes
+            .iter()
+            .take(live_process_limit(ui.width, ui.height).min(5))
+            .map(|process| {
+                vec![
+                    process.pid.to_string(),
+                    process.exe_path.clone(),
+                    process.cwd.clone(),
+                    process.hottest_file.clone(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        if !path_rows.is_empty() {
+            out.push_str(&ui.table(
+                "Process Paths",
+                &[
+                    Column {
+                        header: "PID",
+                        min: 5,
+                        max: 7,
+                        align: Align::Right,
+                    },
+                    Column {
+                        header: "Executable",
+                        min: 14,
+                        max: 28,
+                        align: Align::Left,
+                    },
+                    Column {
+                        header: "CWD",
+                        min: 14,
+                        max: 24,
+                        align: Align::Left,
+                    },
+                    Column {
+                        header: "Hottest File",
+                        min: 14,
+                        max: 28,
+                        align: Align::Left,
+                    },
+                ],
+                &path_rows,
+            ));
+        }
     }
 
-    let file_rows = report
-        .top_files
-        .iter()
-        .take(row_limit(ui.width))
-        .map(|file| {
-            vec![
-                file.file_path.clone(),
-                file.last_pid_touching_file.to_string(),
-                fmt_bytes(file.read_bytes),
-                fmt_bytes(file.write_bytes),
-            ]
-        })
-        .collect::<Vec<_>>();
-    if !file_rows.is_empty() {
-        out.push_str(&ui.table(
-            "Top Files",
-            &[
-                Column {
-                    header: "File",
-                    min: 16,
-                    max: 36,
-                    align: Align::Left,
-                },
-                Column {
-                    header: "PID",
-                    min: 5,
-                    max: 7,
-                    align: Align::Right,
-                },
-                Column {
-                    header: "Read",
-                    min: 10,
-                    max: 11,
-                    align: Align::Right,
-                },
-                Column {
-                    header: "Write",
-                    min: 10,
-                    max: 11,
-                    align: Align::Right,
-                },
-            ],
-            &file_rows,
-        ));
+    if ui.height > 48 {
+        let file_rows = report
+            .top_files
+            .iter()
+            .take(live_file_limit(ui.width, ui.height))
+            .map(|file| {
+                vec![
+                    file.file_path.clone(),
+                    file.last_pid_touching_file.to_string(),
+                    fmt_bytes(file.read_bytes),
+                    fmt_bytes(file.write_bytes),
+                ]
+            })
+            .collect::<Vec<_>>();
+        if !file_rows.is_empty() {
+            out.push_str(&ui.table(
+                "Top Files",
+                &[
+                    Column {
+                        header: "File",
+                        min: 16,
+                        max: 36,
+                        align: Align::Left,
+                    },
+                    Column {
+                        header: "PID",
+                        min: 5,
+                        max: 7,
+                        align: Align::Right,
+                    },
+                    Column {
+                        header: "Read",
+                        min: 10,
+                        max: 11,
+                        align: Align::Right,
+                    },
+                    Column {
+                        header: "Write",
+                        min: 10,
+                        max: 11,
+                        align: Align::Right,
+                    },
+                ],
+                &file_rows,
+            ));
+        }
     }
 
     out.push_str(&ui.note(
@@ -1460,6 +1493,35 @@ fn row_limit(width: usize) -> usize {
     }
 }
 
+fn live_process_limit(width: usize, height: usize) -> usize {
+    let width_limit = row_limit(width);
+    if height <= 28 {
+        width_limit.min(4)
+    } else if height <= 40 {
+        width_limit.min(5)
+    } else {
+        width_limit
+    }
+}
+
+fn live_device_limit(width: usize, height: usize) -> usize {
+    let width_limit = row_limit(width);
+    if height <= 32 {
+        width_limit.min(3)
+    } else {
+        width_limit
+    }
+}
+
+fn live_file_limit(width: usize, height: usize) -> usize {
+    let width_limit = row_limit(width);
+    if height <= 56 {
+        width_limit.min(4)
+    } else {
+        width_limit
+    }
+}
+
 fn stdout_width() -> Option<usize> {
     if unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1 {
         return None;
@@ -1473,6 +1535,24 @@ fn stdout_width() -> Option<usize> {
     let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) };
     if result == 0 && size.ws_col > 0 {
         Some(size.ws_col as usize)
+    } else {
+        None
+    }
+}
+
+fn stdout_height() -> Option<usize> {
+    if unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1 {
+        return None;
+    }
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let result = unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut size) };
+    if result == 0 && size.ws_row > 0 {
+        Some(size.ws_row as usize)
     } else {
         None
     }
@@ -1587,6 +1667,7 @@ mod tests {
     fn fits_table_within_requested_width() {
         let ui = Ui {
             width: 72,
+            height: 40,
             color: false,
         };
         let rendered = ui.table(
@@ -1630,6 +1711,7 @@ mod tests {
     fn joins_panels_horizontally_when_they_fit() {
         let ui = Ui {
             width: 120,
+            height: 40,
             color: false,
         };
         let left = ui.kv_table("Left", &[("A".to_string(), "1".to_string())]);
