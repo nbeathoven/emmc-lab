@@ -120,12 +120,8 @@ pub fn collect_system_snapshot() -> SystemSnapshot {
         cpu_frequency_mhz: read_cpu_freq(),
         mem_total_kb: meminfo_value("MemTotal"),
         mem_available_kb: meminfo_value("MemAvailable"),
-        load_average: read_trimmed("/proc/loadavg").map(|v| {
-            v.split_whitespace()
-                .take(3)
-                .collect::<Vec<_>>()
-                .join(" ")
-        }),
+        load_average: read_trimmed("/proc/loadavg")
+            .map(|v| v.split_whitespace().take(3).collect::<Vec<_>>().join(" ")),
     }
 }
 
@@ -262,12 +258,19 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
     Ok(devices)
 }
 
-pub fn assess_raw_target_safety(path: &Path, write_intent: bool, confirmed: bool) -> Result<SafetyAssessment> {
+pub fn assess_raw_target_safety(
+    path: &Path,
+    write_intent: bool,
+    confirmed: bool,
+) -> Result<SafetyAssessment> {
     let mut assessment = SafetyAssessment::default();
-    let metadata = fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
     let file_type = metadata.file_type();
     if !file_type.is_block_device() {
-        assessment.reasons.push("target is not a block device".to_string());
+        assessment
+            .reasons
+            .push("target is not a block device".to_string());
     }
     let mounts = parse_mountinfo().unwrap_or_default();
     let path_string = path.display().to_string();
@@ -292,9 +295,10 @@ pub fn assess_raw_target_safety(path: &Path, write_intent: bool, confirmed: bool
         );
     }
     if !write_intent {
-        assessment
-            .warnings
-            .push("raw read workloads are non-destructive but still bypass filesystem safeguards".to_string());
+        assessment.warnings.push(
+            "raw read workloads are non-destructive but still bypass filesystem safeguards"
+                .to_string(),
+        );
     }
     assessment.allowed = assessment.reasons.is_empty();
     Ok(assessment)
@@ -309,8 +313,12 @@ pub fn block_device_size(path: &Path) -> Option<u64> {
 
 pub fn logical_block_size(path: &Path) -> Option<u64> {
     let name = path.file_name()?.to_string_lossy().to_string();
-    read_trimmed(PathBuf::from("/sys/class/block").join(name).join("queue/logical_block_size"))
-        .and_then(|s| s.parse::<u64>().ok())
+    read_trimmed(
+        PathBuf::from("/sys/class/block")
+            .join(name)
+            .join("queue/logical_block_size"),
+    )
+    .and_then(|s| s.parse::<u64>().ok())
 }
 
 pub fn command_exists(name: &str) -> bool {
@@ -333,7 +341,8 @@ pub fn io_uring_available() -> bool {
 
 pub fn deep_trace_available() -> bool {
     let is_root = unsafe { libc::geteuid() } == 0;
-    let tracing = Path::new("/sys/kernel/tracing").exists() || Path::new("/sys/kernel/debug/tracing").exists();
+    let tracing = Path::new("/sys/kernel/tracing").exists()
+        || Path::new("/sys/kernel/debug/tracing").exists();
     let bpf = Path::new("/sys/fs/bpf").exists();
     is_root && (tracing || bpf)
 }
@@ -342,13 +351,7 @@ pub fn direct_io_viable(paths: &AppPaths) -> Result<bool> {
     let path = paths.base_dir.join("o_direct_probe.bin");
     fs::write(&path, vec![0_u8; 4096])?;
     let c_path = std::ffi::CString::new(path.to_string_lossy().to_string())?;
-    let fd = unsafe {
-        libc::open(
-            c_path.as_ptr(),
-            libc::O_RDWR | o_direct_flag(),
-            0o644,
-        )
-    };
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDWR | o_direct_flag(), 0o644) };
     let ok = if fd < 0 {
         false
     } else {

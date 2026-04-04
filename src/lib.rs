@@ -7,3 +7,4 @@ pub mod profile;
 pub mod report;
 pub mod storage;
 pub mod system;
+pub mod ui;

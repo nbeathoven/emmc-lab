@@ -142,7 +142,12 @@ pub fn run_live_sampler_until(
     session_id: Option<String>,
     stop_signal: Arc<AtomicBool>,
 ) -> Result<DiagnosticReport> {
-    run_live_sampler_internal(Duration::from_secs(u64::MAX / 4), interval, session_id, Some(stop_signal))
+    run_live_sampler_internal(
+        Duration::from_secs(u64::MAX / 4),
+        interval,
+        session_id,
+        Some(stop_signal),
+    )
 }
 
 fn run_live_sampler_internal(
@@ -211,9 +216,11 @@ fn run_live_sampler_internal(
             agg.storage_write_bytes = agg
                 .storage_write_bytes
                 .saturating_add(after.write_bytes.saturating_sub(before.write_bytes));
-            agg.cancelled_write_bytes = agg
-                .cancelled_write_bytes
-                .saturating_add(after.cancelled_write_bytes.saturating_sub(before.cancelled_write_bytes));
+            agg.cancelled_write_bytes = agg.cancelled_write_bytes.saturating_add(
+                after
+                    .cancelled_write_bytes
+                    .saturating_sub(before.cancelled_write_bytes),
+            );
             agg.read_syscalls = agg
                 .read_syscalls
                 .saturating_add(after.syscr.saturating_sub(before.syscr));
@@ -410,8 +417,10 @@ fn read_pid_snapshot(pid: i32) -> Result<ProcIo> {
     let status_text = fs::read_to_string(format!("/proc/{}/status", pid)).unwrap_or_default();
     let mut snapshot = ProcIo {
         command: read_cmdline(pid).unwrap_or_else(|| pid.to_string()),
-        exe_path: read_link_string(format!("/proc/{}/exe", pid)).unwrap_or_else(|| "<unresolved>".to_string()),
-        cwd: read_link_string(format!("/proc/{}/cwd", pid)).unwrap_or_else(|| "<unresolved>".to_string()),
+        exe_path: read_link_string(format!("/proc/{}/exe", pid))
+            .unwrap_or_else(|| "<unresolved>".to_string()),
+        cwd: read_link_string(format!("/proc/{}/cwd", pid))
+            .unwrap_or_else(|| "<unresolved>".to_string()),
         open_files: read_open_files(pid),
         ..ProcIo::default()
     };
@@ -492,10 +501,12 @@ fn summarize_directories(files: &[FileSummary]) -> Vec<DirectorySummary> {
             .parent()
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "<unresolved>".to_string());
-        let entry = map.entry(parent.clone()).or_insert_with(|| DirectorySummary {
-            directory_path: parent,
-            ..DirectorySummary::default()
-        });
+        let entry = map
+            .entry(parent.clone())
+            .or_insert_with(|| DirectorySummary {
+                directory_path: parent,
+                ..DirectorySummary::default()
+            });
         entry.total_read_bytes = entry.total_read_bytes.saturating_add(file.read_bytes);
         entry.total_write_bytes = entry.total_write_bytes.saturating_add(file.write_bytes);
         entry.file_count_touched += 1;
@@ -506,7 +517,10 @@ fn summarize_directories(files: &[FileSummary]) -> Vec<DirectorySummary> {
     map.into_values().collect()
 }
 
-fn summarize_devices(before: HashMap<String, Vec<u64>>, after: HashMap<String, Vec<u64>>) -> Vec<DeviceSummary> {
+fn summarize_devices(
+    before: HashMap<String, Vec<u64>>,
+    after: HashMap<String, Vec<u64>>,
+) -> Vec<DeviceSummary> {
     let mut summaries = Vec::new();
     for (name, values_after) in after {
         let Some(values_before) = before.get(&name) else {

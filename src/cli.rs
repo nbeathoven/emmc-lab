@@ -6,7 +6,11 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "emmc-lab", version, about = "eMMC performance, endurance, health, and I/O diagnostics")]
+#[command(
+    name = "emmc-lab",
+    version,
+    about = "eMMC performance, endurance, health, and I/O diagnostics"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -98,7 +102,8 @@ pub fn run() -> Result<()> {
         },
         Some(Commands::Report { session }) => app::run_report(&paths, &session),
         Some(Commands::Export { session, format }) => {
-            let format = ExportFormat::parse(&format).ok_or_else(|| anyhow!("unsupported format"))?;
+            let format =
+                ExportFormat::parse(&format).ok_or_else(|| anyhow!("unsupported format"))?;
             app::run_export(&paths, &session, format)
         }
         Some(Commands::ListDevices) => app::run_list_devices(),

@@ -1,8 +1,8 @@
 use crate::storage::{load_session, SessionRecord};
 use crate::system::AppPaths;
+use crate::ui::render_session_summary;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
@@ -26,157 +26,14 @@ impl ExportFormat {
 }
 
 pub fn terminal_summary(record: &SessionRecord) -> String {
-    let mut out = String::new();
-    let _ = writeln!(&mut out, "Session: {}", record.session_id);
-    let _ = writeln!(&mut out, "Created: {}", record.created_at);
-    if let Some(run) = &record.run_summary {
-        let _ = writeln!(
-            &mut out,
-            "Run: backend={} target={} mode={}",
-            run.backend,
-            run.target_path.display(),
-            run.target_mode
-        );
-        let _ = writeln!(
-            &mut out,
-            "Reads completed: {}  Writes completed: {}",
-            run.read_ios_completed, run.write_ios_completed
-        );
-        let _ = writeln!(
-            &mut out,
-            "Read bytes: {}  Write bytes: {}",
-            run.read_bytes_completed, run.write_bytes_completed
-        );
-        let _ = writeln!(
-            &mut out,
-            "Read latency p50/p95/p99/p99.9 (us): {}/{}/{}/{}",
-            run.read_latency.p50_us,
-            run.read_latency.p95_us,
-            run.read_latency.p99_us,
-            run.read_latency.p999_us
-        );
-        let _ = writeln!(
-            &mut out,
-            "Write latency p50/p95/p99/p99.9 (us): {}/{}/{}/{}",
-            run.write_latency.p50_us,
-            run.write_latency.p95_us,
-            run.write_latency.p99_us,
-            run.write_latency.p999_us
-        );
-        let _ = writeln!(
-            &mut out,
-            "Errors: failed_reads={} failed_writes={} partial_reads={} partial_writes={} retries={} verify_failures={} sync_failures={}",
-            run.failed_reads,
-            run.failed_writes,
-            run.partial_reads,
-            run.partial_writes,
-            run.retries,
-            run.verify_failures,
-            run.sync_failures
-        );
-        let _ = writeln!(
-            &mut out,
-            "Logical range: start={} length={} logical_sector_size={}",
-            run.addressed_range_start_bytes, run.addressed_range_length_bytes, run.logical_sector_size
-        );
-    }
-    if let Some(diag) = &record.diagnostics {
-        let _ = writeln!(
-            &mut out,
-            "Diagnostics: mode={:?} duration={}s unresolved_paths={} dropped_events={}",
-            diag.mode, diag.duration_seconds, diag.unresolved_path_count, diag.dropped_event_count
-        );
-        let _ = writeln!(
-            &mut out,
-            "Observed entities: processes={} files={} directories={} devices={}",
-            diag.top_processes.len(),
-            diag.top_files.len(),
-            diag.top_directories.len(),
-            diag.device_totals.len()
-        );
-        if let Some(top) = diag.top_processes.first() {
-            let _ = writeln!(
-                &mut out,
-                "Top process: pid={} cmd={} storage_r/s={:.1} storage_w/s={:.1}",
-                top.pid, top.command, top.storage_read_bytes_per_sec, top.storage_write_bytes_per_sec
-            );
-        }
-        if !diag.top_processes.is_empty() {
-            let _ = writeln!(&mut out, "Top processes:");
-            for p in diag.top_processes.iter().take(5) {
-                let _ = writeln!(
-                    &mut out,
-                    "- pid={} user={} cmd={} logical_r/s={:.1} logical_w/s={:.1} storage_r/s={:.1} storage_w/s={:.1}",
-                    p.pid,
-                    p.user,
-                    p.command,
-                    p.logical_read_bytes_per_sec,
-                    p.logical_write_bytes_per_sec,
-                    p.storage_read_bytes_per_sec,
-                    p.storage_write_bytes_per_sec
-                );
-            }
-        }
-        if !diag.top_files.is_empty() {
-            let _ = writeln!(&mut out, "Top files:");
-            for f in diag.top_files.iter().take(5) {
-                let _ = writeln!(
-                    &mut out,
-                    "- path={} read_bytes={} write_bytes={} read_ops={} write_ops={}",
-                    f.file_path,
-                    f.read_bytes,
-                    f.write_bytes,
-                    f.read_ops,
-                    f.write_ops
-                );
-            }
-        }
-        if !diag.top_directories.is_empty() {
-            let _ = writeln!(&mut out, "Top directories:");
-            for d in diag.top_directories.iter().take(5) {
-                let _ = writeln!(
-                    &mut out,
-                    "- path={} read_bytes={} write_bytes={} file_count={}",
-                    d.directory_path,
-                    d.total_read_bytes,
-                    d.total_write_bytes,
-                    d.file_count_touched
-                );
-            }
-        }
-        if !diag.device_totals.is_empty() {
-            let _ = writeln!(&mut out, "Device totals:");
-            for d in diag.device_totals.iter().take(5) {
-                let _ = writeln!(
-                    &mut out,
-                    "- device={} reads_completed={} writes_completed={} sectors_read={} sectors_written={} in_progress={}",
-                    d.device,
-                    d.reads_completed,
-                    d.writes_completed,
-                    d.sectors_read,
-                    d.sectors_written,
-                    d.current_ios_in_progress
-                );
-            }
-        }
-        if let Some(fallback) = &diag.fallback_message {
-            let _ = writeln!(&mut out, "Fallback: {}", fallback);
-        }
-        let _ = writeln!(&mut out, "Attribution note: {}", diag.attribution_note);
-    }
-    if let Some(note) = &record.contamination_note {
-        let _ = writeln!(&mut out, "Interference note: {}", note);
-    }
-    if !record.notes.is_empty() {
-        let _ = writeln!(&mut out, "Notes:");
-        for note in &record.notes {
-            let _ = writeln!(&mut out, "- {}", note);
-        }
-    }
-    out
+    render_session_summary(record)
 }
 
-pub fn export_session(paths: &AppPaths, session_id: &str, format: ExportFormat) -> Result<Vec<PathBuf>> {
+pub fn export_session(
+    paths: &AppPaths,
+    session_id: &str,
+    format: ExportFormat,
+) -> Result<Vec<PathBuf>> {
     let record = load_session(paths, session_id)?;
     fs::create_dir_all(&paths.exports_dir)?;
     match format {
@@ -197,7 +54,9 @@ pub fn export_session(paths: &AppPaths, session_id: &str, format: ExportFormat) 
 fn export_csv(paths: &AppPaths, record: &SessionRecord) -> Result<Vec<PathBuf>> {
     let mut paths_out = Vec::new();
 
-    let summary_path = paths.exports_dir.join(format!("{}_summary.csv", record.session_id));
+    let summary_path = paths
+        .exports_dir
+        .join(format!("{}_summary.csv", record.session_id));
     let mut summary_csv = String::from("session_id,created_at,target,backend,read_ios,write_ios,read_bytes,write_bytes,failed_reads,failed_writes,verify_failures,sync_failures\n");
     if let Some(run) = &record.run_summary {
         let line = format!(
@@ -220,7 +79,9 @@ fn export_csv(paths: &AppPaths, record: &SessionRecord) -> Result<Vec<PathBuf>> 
     fs::write(&summary_path, summary_csv)?;
     paths_out.push(summary_path);
 
-    let interval_path = paths.exports_dir.join(format!("{}_intervals.csv", record.session_id));
+    let interval_path = paths
+        .exports_dir
+        .join(format!("{}_intervals.csv", record.session_id));
     let mut interval_csv = String::from("second,read_ios_completed,write_ios_completed,read_bytes_completed,write_bytes_completed,failed_reads,failed_writes,partial_reads,partial_writes,retries,verify_failures,sync_failures\n");
     for i in &record.interval_stats {
         interval_csv.push_str(&format!(
@@ -243,7 +104,9 @@ fn export_csv(paths: &AppPaths, record: &SessionRecord) -> Result<Vec<PathBuf>> 
     paths_out.push(interval_path);
 
     if let Some(diag) = &record.diagnostics {
-        let process_path = paths.exports_dir.join(format!("{}_processes.csv", record.session_id));
+        let process_path = paths
+            .exports_dir
+            .join(format!("{}_processes.csv", record.session_id));
         let mut process_csv = String::from("pid,user,command,exe_path,cwd,logical_read_bytes_per_sec,logical_write_bytes_per_sec,storage_read_bytes_per_sec,storage_write_bytes_per_sec,read_syscalls_per_sec,write_syscalls_per_sec,open_file_count,hottest_file,hottest_directory,observed_share_percent\n");
         for p in &diag.top_processes {
             process_csv.push_str(&format!(
@@ -293,7 +156,9 @@ fn render_html(record: &SessionRecord) -> String {
         ));
         html.push_str(&format!(
             "<tr><th>Logical Range</th><td>start={} length={} logical_sector_size={}</td></tr>",
-            run.addressed_range_start_bytes, run.addressed_range_length_bytes, run.logical_sector_size
+            run.addressed_range_start_bytes,
+            run.addressed_range_length_bytes,
+            run.logical_sector_size
         ));
     }
     html.push_str("</table>");
@@ -310,11 +175,17 @@ fn render_html(record: &SessionRecord) -> String {
         ));
         html.push_str(&format!(
             "<tr><th>Read Latency (us)</th><td>p50={} p95={} p99={} p99.9={}</td></tr>",
-            run.read_latency.p50_us, run.read_latency.p95_us, run.read_latency.p99_us, run.read_latency.p999_us
+            run.read_latency.p50_us,
+            run.read_latency.p95_us,
+            run.read_latency.p99_us,
+            run.read_latency.p999_us
         ));
         html.push_str(&format!(
             "<tr><th>Write Latency (us)</th><td>p50={} p95={} p99={} p99.9={}</td></tr>",
-            run.write_latency.p50_us, run.write_latency.p95_us, run.write_latency.p99_us, run.write_latency.p999_us
+            run.write_latency.p50_us,
+            run.write_latency.p95_us,
+            run.write_latency.p99_us,
+            run.write_latency.p999_us
         ));
         html.push_str(&format!(
             "<tr><th>Errors</th><td>failed_reads={} failed_writes={} partial_reads={} partial_writes={} retries={} verify_failures={} sync_failures={}</td></tr>",
@@ -372,7 +243,10 @@ fn render_html(record: &SessionRecord) -> String {
     }
 
     if let Some(note) = &record.contamination_note {
-        html.push_str(&format!("<p><strong>Interference note:</strong> {}</p>", escape_html(note)));
+        html.push_str(&format!(
+            "<p><strong>Interference note:</strong> {}</p>",
+            escape_html(note)
+        ));
     }
     if !record.notes.is_empty() {
         html.push_str("<h2>Notes</h2><ul>");

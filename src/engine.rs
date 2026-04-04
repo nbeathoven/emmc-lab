@@ -1,4 +1,6 @@
-use crate::profile::{DurabilityMode, Profile, ResolvedRange, StopCondition, TargetMode, WorkloadType};
+use crate::profile::{
+    DurabilityMode, Profile, ResolvedRange, StopCondition, TargetMode, WorkloadType,
+};
 use crate::system::{block_device_size, io_uring_available, logical_block_size};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -162,10 +164,18 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
             let second = started.elapsed().as_secs();
             let _ = interval_tx.send(IntervalStats {
                 second,
-                read_ios_completed: current.read_ios_completed.saturating_sub(prev.read_ios_completed),
-                write_ios_completed: current.write_ios_completed.saturating_sub(prev.write_ios_completed),
-                read_bytes_completed: current.read_bytes_completed.saturating_sub(prev.read_bytes_completed),
-                write_bytes_completed: current.write_bytes_completed.saturating_sub(prev.write_bytes_completed),
+                read_ios_completed: current
+                    .read_ios_completed
+                    .saturating_sub(prev.read_ios_completed),
+                write_ios_completed: current
+                    .write_ios_completed
+                    .saturating_sub(prev.write_ios_completed),
+                read_bytes_completed: current
+                    .read_bytes_completed
+                    .saturating_sub(prev.read_bytes_completed),
+                write_bytes_completed: current
+                    .write_bytes_completed
+                    .saturating_sub(prev.write_bytes_completed),
                 failed_reads: current.failed_reads.saturating_sub(prev.failed_reads),
                 failed_writes: current.failed_writes.saturating_sub(prev.failed_writes),
                 partial_reads: current.partial_reads.saturating_sub(prev.partial_reads),
@@ -218,7 +228,10 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
         notes.push("Direct I/O requested; alignment was validated against block size and logical sector size.".to_string());
     }
     if backend != "io_uring" && io_uring_available() {
-        notes.push("io_uring appears available, but this run used the fallback pread/pwrite backend.".to_string());
+        notes.push(
+            "io_uring appears available, but this run used the fallback pread/pwrite backend."
+                .to_string(),
+        );
     }
 
     Ok((
@@ -253,10 +266,12 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
 
 fn prepare_target(profile: &Profile) -> Result<u64> {
     match profile.target.mode {
-        TargetMode::RawDevice => {
-            block_device_size(&profile.target.path)
-                .ok_or_else(|| anyhow!("unable to determine raw device size for {}", profile.target.path.display()))
-        }
+        TargetMode::RawDevice => block_device_size(&profile.target.path).ok_or_else(|| {
+            anyhow!(
+                "unable to determine raw device size for {}",
+                profile.target.path.display()
+            )
+        }),
         TargetMode::FileBased => {
             if !profile.target.path.exists() && profile.is_write_workload() {
                 if let Some(parent) = profile.target.path.parent() {
@@ -343,7 +358,8 @@ fn worker_loop(
     let write_access = profile.is_write_workload();
     let fd = open_fd(profile, write_access)?;
     let mut io_buffer = AlignedBuffer::new(block, block.max(range.logical_sector_size as usize))?;
-    let mut verify_buffer = AlignedBuffer::new(block, block.max(range.logical_sector_size as usize))?;
+    let mut verify_buffer =
+        AlignedBuffer::new(block, block.max(range.logical_sector_size as usize))?;
     let mut writes_since_sync = 0_u64;
     let mut last_sync = Instant::now();
 
@@ -382,11 +398,15 @@ fn worker_loop(
                 match do_pread(fd, io_buffer.as_mut_ptr(), block, offset) {
                     Ok(n) if n == block => {
                         counters.read_ios_completed.fetch_add(1, Ordering::Relaxed);
-                        counters.read_bytes_completed.fetch_add(n as u64, Ordering::Relaxed);
+                        counters
+                            .read_bytes_completed
+                            .fetch_add(n as u64, Ordering::Relaxed);
                     }
                     Ok(n) => {
                         counters.partial_reads.fetch_add(1, Ordering::Relaxed);
-                        counters.read_bytes_completed.fetch_add(n as u64, Ordering::Relaxed);
+                        counters
+                            .read_bytes_completed
+                            .fetch_add(n as u64, Ordering::Relaxed);
                     }
                     Err(err) => {
                         if should_retry(&err) {
@@ -399,17 +419,27 @@ fn worker_loop(
                 local.read_hist.record(t0.elapsed());
             }
             IoKind::Write => {
-                fill_pattern(io_buffer.as_mut_slice(), profile.workload.random_seed, op_index, offset, worker_id as u64);
+                fill_pattern(
+                    io_buffer.as_mut_slice(),
+                    profile.workload.random_seed,
+                    op_index,
+                    offset,
+                    worker_id as u64,
+                );
                 let checksum = crc32fast::hash(io_buffer.as_slice());
                 let t0 = Instant::now();
                 match do_pwrite(fd, io_buffer.as_ptr(), block, offset) {
                     Ok(n) if n == block => {
                         counters.write_ios_completed.fetch_add(1, Ordering::Relaxed);
-                        counters.write_bytes_completed.fetch_add(n as u64, Ordering::Relaxed);
+                        counters
+                            .write_bytes_completed
+                            .fetch_add(n as u64, Ordering::Relaxed);
                     }
                     Ok(n) => {
                         counters.partial_writes.fetch_add(1, Ordering::Relaxed);
-                        counters.write_bytes_completed.fetch_add(n as u64, Ordering::Relaxed);
+                        counters
+                            .write_bytes_completed
+                            .fetch_add(n as u64, Ordering::Relaxed);
                     }
                     Err(err) => {
                         if should_retry(&err) {
@@ -514,7 +544,11 @@ fn compute_op_kind(profile: &Profile, op_index: u64) -> IoKind {
 }
 
 fn open_fd(profile: &Profile, write_access: bool) -> Result<RawFd> {
-    let mut flags = if write_access { libc::O_RDWR } else { libc::O_RDONLY };
+    let mut flags = if write_access {
+        libc::O_RDWR
+    } else {
+        libc::O_RDONLY
+    };
     if profile.workload.direct_io {
         flags |= o_direct_flag();
     }

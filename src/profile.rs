@@ -316,7 +316,11 @@ impl Profile {
         )
     }
 
-    pub fn resolved_range(&self, target_len: u64, logical_sector_size: u64) -> Result<ResolvedRange> {
+    pub fn resolved_range(
+        &self,
+        target_len: u64,
+        logical_sector_size: u64,
+    ) -> Result<ResolvedRange> {
         let logical_sector_size = logical_sector_size.max(512);
         let (start_bytes, length_bytes) = match self.addressing.mode {
             AddressingMode::WholeSelectedRange => (0_u64, target_len),
@@ -352,7 +356,11 @@ impl Profile {
         }
         let block = self.workload.block_size_bytes as u64;
         if start_bytes % block != 0 {
-            bail!("start offset {} is not aligned to block size {}", start_bytes, block);
+            bail!(
+                "start offset {} is not aligned to block size {}",
+                start_bytes,
+                block
+            );
         }
         if length_bytes < block {
             bail!("range must be at least one block");

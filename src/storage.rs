@@ -71,8 +71,8 @@ pub fn save_session(paths: &AppPaths, record: &SessionRecord) -> Result<PathBuf>
 
 pub fn load_session(paths: &AppPaths, session_id: &str) -> Result<SessionRecord> {
     let path = session_dir(paths, session_id).join("session.json");
-    let text = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
     let record = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(record)
@@ -100,7 +100,10 @@ pub fn list_profiles(paths: &AppPaths) -> Result<Vec<PathBuf>> {
         let entry = entry?;
         if entry.file_type()?.is_file() {
             let path = entry.path();
-            if matches!(path.extension().and_then(|e| e.to_str()), Some("yaml" | "yml")) {
+            if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("yaml" | "yml")
+            ) {
                 profiles.push(path);
             }
         }

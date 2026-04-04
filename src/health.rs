@@ -1,4 +1,6 @@
-use crate::system::{collect_capabilities, collect_system_snapshot, command_exists, AppPaths, SystemSnapshot};
+use crate::system::{
+    collect_capabilities, collect_system_snapshot, command_exists, AppPaths, SystemSnapshot,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -73,7 +75,9 @@ pub fn read_emmc_health(device: &Path) -> Result<EmmcHealthSnapshot> {
         device_life_time_est_typ_b: parse_extcsd_field(&combined, "DEVICE_LIFE_TIME_EST_TYP_B"),
         pre_eol_info: parse_extcsd_field(&combined, "PRE_EOL_INFO"),
         raw_text: Some(combined),
-        note: "health values are best-effort values reported by EXT_CSD when mmc-utils is available".to_string(),
+        note:
+            "health values are best-effort values reported by EXT_CSD when mmc-utils is available"
+                .to_string(),
     })
 }
 
