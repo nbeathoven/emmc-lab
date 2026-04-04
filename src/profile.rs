@@ -73,6 +73,8 @@ pub enum DurabilityMode {
 pub struct TargetConfig {
     pub mode: TargetMode,
     pub path: PathBuf,
+    #[serde(default)]
+    pub create_if_missing_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,6 +168,7 @@ impl Profile {
             target: TargetConfig {
                 mode: TargetMode::FileBased,
                 path: PathBuf::from("/tmp/emmc-lab.bin"),
+                create_if_missing_size_bytes: Some(1024 * 1024 * 1024),
             },
             workload: WorkloadConfig {
                 test_type: WorkloadType::RandRead,
@@ -240,6 +243,14 @@ impl Profile {
         }
         if self.target.path.as_os_str().is_empty() {
             bail!("target path cannot be empty");
+        }
+        if self.target.create_if_missing_size_bytes == Some(0) {
+            bail!("create_if_missing_size_bytes must be > 0 when configured");
+        }
+        if self.target.mode == TargetMode::RawDevice
+            && self.target.create_if_missing_size_bytes.is_some()
+        {
+            bail!("create_if_missing_size_bytes is only valid for file-based targets");
         }
         if self.target.mode == TargetMode::FileBased
             && self.target.path.exists()
@@ -402,6 +413,7 @@ impl Profile {
                 "Profile: {name}\n",
                 "Target mode: {target_mode}\n",
                 "Target path: {target_path}\n",
+                "Create missing file size: {create_if_missing}\n",
                 "Workload: {test_type}\n",
                 "Addressing: {addressing:?}\n",
                 "Block size: {block_size}\n",
@@ -419,6 +431,11 @@ impl Profile {
             name = self.name,
             target_mode = self.target.mode,
             target_path = self.target.path.display(),
+            create_if_missing = self
+                .target
+                .create_if_missing_size_bytes
+                .map(|size| format!("{size} bytes (runtime only, skipped if file exists)"))
+                .unwrap_or_else(|| "none".to_string()),
             test_type = self.workload.test_type,
             addressing = self.addressing.mode,
             block_size = self.workload.block_size_bytes,
@@ -450,6 +467,7 @@ name: smoke
 target:
   mode: file_based
   path: /tmp/test.bin
+  create_if_missing_size_bytes: 1048576
 workload:
   test_type: randwrite
   block_size_bytes: 4096
@@ -512,6 +530,13 @@ safety:
         let mut profile = Profile::default_named("invalid");
         profile.workload.runtime_seconds = None;
         profile.workload.exact_op_count = None;
+        assert!(profile.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_runtime_create_size() {
+        let mut profile = Profile::default_named("invalid");
+        profile.target.create_if_missing_size_bytes = Some(0);
         assert!(profile.validate().is_err());
     }
 }

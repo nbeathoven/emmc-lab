@@ -279,18 +279,38 @@ fn prepare_target(profile: &Profile) -> Result<u64> {
                     profile.target.path.display()
                 );
             }
-            if !profile.target.path.exists() && profile.is_write_workload() {
+            let mut created_missing_file = false;
+            if !profile.target.path.exists() {
                 if let Some(parent) = profile.target.path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let _ = OpenOptions::new()
-                    .create(true)
-                    .write(true)
-                    .read(true)
-                    .open(&profile.target.path)?;
+                let runtime_size = profile
+                    .target
+                    .create_if_missing_size_bytes
+                    .or_else(|| profile.is_write_workload().then_some(1024 * 1024));
+                if let Some(runtime_size) = runtime_size {
+                    let file = OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .read(true)
+                        .open(&profile.target.path)?;
+                    file.set_len(runtime_size)?;
+                    created_missing_file = true;
+                }
             }
             let metadata = fs::metadata(&profile.target.path)
-                .with_context(|| format!("failed to stat {}", profile.target.path.display()))?;
+                .with_context(|| {
+                    if profile.target.create_if_missing_size_bytes.is_none()
+                        && !profile.is_write_workload()
+                    {
+                        format!(
+                            "failed to stat {} (file-based read workloads require an existing file or target.create_if_missing_size_bytes)",
+                            profile.target.path.display()
+                        )
+                    } else {
+                        format!("failed to stat {}", profile.target.path.display())
+                    }
+                })?;
             let existing = metadata.len();
             let requested = match profile.addressing.mode {
                 crate::profile::AddressingMode::WholeSelectedRange => existing.max(1024 * 1024),
@@ -306,7 +326,7 @@ fn prepare_target(profile: &Profile) -> Result<u64> {
                     .saturating_add(profile.addressing.range_size_bytes.unwrap_or(0)),
             }
             .max(existing);
-            if profile.is_write_workload() && requested > existing {
+            if (profile.is_write_workload() || created_missing_file) && requested > existing {
                 let file = OpenOptions::new()
                     .create(true)
                     .write(true)

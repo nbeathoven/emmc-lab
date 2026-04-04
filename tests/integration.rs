@@ -63,6 +63,33 @@ fn file_mode_exact_operation_stop_condition() -> Result<()> {
 }
 
 #[test]
+fn missing_file_read_target_can_be_created_at_runtime() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let target = tmp.path().join("runtime-read.bin");
+    let mut profile = Profile::default_named("runtime-read");
+    profile.target.mode = TargetMode::FileBased;
+    profile.target.path = target.clone();
+    profile.target.create_if_missing_size_bytes = Some(4096 * 32);
+    profile.workload.test_type = WorkloadType::RandRead;
+    profile.workload.block_size_bytes = 4096;
+    profile.workload.runtime_seconds = None;
+    profile.workload.exact_op_count = Some(8);
+    profile.addressing.mode = AddressingMode::ByteRange;
+    profile.addressing.start_offset_bytes = Some(0);
+    profile.addressing.range_size_bytes = Some(4096 * 8);
+    profile.telemetry.health_telemetry = false;
+    profile.reporting.export_json = false;
+    profile.reporting.export_csv = false;
+    profile.reporting.export_html = false;
+
+    let (summary, _intervals) = execute_profile(&profile)?;
+    assert_eq!(summary.read_ios_completed, 8);
+    assert!(target.exists());
+    assert_eq!(fs::metadata(&target)?.len(), 4096 * 32);
+    Ok(())
+}
+
+#[test]
 fn combined_test_and_diagnostics_session_is_saved() -> Result<()> {
     let (_dir, paths) = temp_paths()?;
     let target = paths.base_dir.join("combined.bin");

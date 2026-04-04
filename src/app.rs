@@ -16,8 +16,10 @@ use crate::ui::{render_device_list, render_doctor_report, render_health_report, 
 use anyhow::{bail, Result};
 use chrono::Utc;
 use std::env;
+use std::ffi::CString;
 use std::fs;
 use std::io::{self, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,23 +61,29 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
         println!("7. Settings / Paths / Defaults");
         println!("8. Help");
         println!("9. Exit");
-        match prompt("Select an option")?.as_str() {
-            "1" => {
+        match prompt_menu_default(
+            "Select an option [1-9]",
+            "1",
+            &["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+        )? {
+            WizardInput::Value(value) if value == "1" => {
                 if let Some(outcome) = wizard(paths, None)? {
                     if outcome.run_now {
                         let _ = run_profile_session(paths, outcome.profile)?;
                     }
                 }
             }
-            "2" => run_saved_profile_flow(paths)?,
-            "3" => live_sampler_flow(paths)?,
-            "4" => deep_trace_flow(paths)?,
-            "5" => health_flow(paths)?,
-            "6" => reports_flow(paths)?,
-            "7" => settings_flow(paths)?,
-            "8" => print_help(paths),
-            "9" => break,
-            _ => println!("Invalid choice"),
+            WizardInput::Value(value) if value == "2" => run_saved_profile_flow(paths)?,
+            WizardInput::Value(value) if value == "3" => live_sampler_flow(paths)?,
+            WizardInput::Value(value) if value == "4" => deep_trace_flow(paths)?,
+            WizardInput::Value(value) if value == "5" => health_flow(paths)?,
+            WizardInput::Value(value) if value == "6" => reports_flow(paths)?,
+            WizardInput::Value(value) if value == "7" => settings_flow(paths)?,
+            WizardInput::Value(value) if value == "8" => print_help(paths),
+            WizardInput::Value(value) if value == "9" => break,
+            WizardInput::Back => continue,
+            WizardInput::Cancel => break,
+            WizardInput::Value(_) => unreachable!(),
         }
     }
     Ok(())
@@ -295,12 +303,39 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Value(path) => {
                     let normalized =
                         normalize_file_target_path(&profile.target.mode, PathBuf::from(path));
-                    if normalized != profile.target.path {
-                        println!("Using target path: {}", normalized.display());
-                    }
                     profile.target.path = normalized;
                     let hints = wizard_target_hints(&profile);
                     println!("Discovered target: {}", hints.target_label);
+                    if profile.target.mode == TargetMode::FileBased
+                        && !profile.target.path.exists()
+                        && !profile.target.path.is_dir()
+                    {
+                        let default_size =
+                            suggested_runtime_file_size(&profile, &hints).max(1_048_576);
+                        let min_size =
+                            minimum_runtime_file_size(&profile, hints.logical_sector_size)
+                                .max(1_048_576);
+                        let max_size = maximum_runtime_file_size(&profile.target.path)
+                            .map(|bytes| bytes.max(min_size))
+                            .unwrap_or(default_size.saturating_mul(64).max(min_size));
+                        match prompt_u64_in_range(
+                            &format!(
+                                "Create file at runtime if missing bytes [recommended {}]",
+                                format_bytes(default_size)
+                            ),
+                            default_size.clamp(min_size, max_size),
+                            min_size,
+                            max_size,
+                        )? {
+                            WizardInput::Value(value) => {
+                                profile.target.create_if_missing_size_bytes = Some(value);
+                            }
+                            WizardInput::Back => continue,
+                            WizardInput::Cancel => return Ok(None),
+                        }
+                    } else {
+                        profile.target.create_if_missing_size_bytes = None;
+                    }
                 }
                 WizardInput::Back => {
                     step -= 1;
@@ -643,8 +678,8 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         println!("3. Save and run now");
         println!("4. Back");
         println!("5. Cancel");
-        match prompt("Choose action")?.as_str() {
-            "1" => {
+        match prompt_menu_default("Choose action [1-5]", "1", &["1", "2", "3", "4", "5"])? {
+            WizardInput::Value(value) if value == "1" => {
                 profile.save(&profile_path)?;
                 println!("Saved profile: {}", profile_path.display());
                 return Ok(Some(WizardOutcome {
@@ -652,13 +687,13 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     run_now: false,
                 }));
             }
-            "2" => {
+            WizardInput::Value(value) if value == "2" => {
                 return Ok(Some(WizardOutcome {
                     profile,
                     run_now: true,
                 }))
             }
-            "3" => {
+            WizardInput::Value(value) if value == "3" => {
                 profile.save(&profile_path)?;
                 println!("Saved profile: {}", profile_path.display());
                 return Ok(Some(WizardOutcome {
@@ -666,9 +701,10 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     run_now: true,
                 }));
             }
-            "4" => return wizard(paths, Some(profile)),
-            "5" | "cancel" => return Ok(None),
-            _ => println!("Invalid choice"),
+            WizardInput::Value(value) if value == "4" => return wizard(paths, Some(profile)),
+            WizardInput::Value(value) if value == "5" => return Ok(None),
+            WizardInput::Back | WizardInput::Cancel => return Ok(None),
+            WizardInput::Value(_) => unreachable!(),
         }
     }
 }
@@ -685,7 +721,15 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
     for (index, profile) in profiles.iter().enumerate() {
         println!("{}. {}", index + 1, profile.display());
     }
-    let choice = prompt_parse::<usize>("Select profile number or 0 to go back")?;
+    let choice = match prompt_usize_in_range(
+        &format!("Select profile number [0-{}]", profiles.len()),
+        1,
+        0,
+        profiles.len(),
+    )? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(()),
+    };
     if choice == 0 || choice > profiles.len() {
         return Ok(());
     }
@@ -695,11 +739,11 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
     println!("1. Run");
     println!("2. Edit in wizard");
     println!("3. Back");
-    match prompt("Choose action")?.as_str() {
-        "1" => {
+    match prompt_menu_default("Choose action [1-3]", "2", &["1", "2", "3"])? {
+        WizardInput::Value(value) if value == "1" => {
             let _ = run_profile_session(paths, profile)?;
         }
-        "2" => {
+        WizardInput::Value(value) if value == "2" => {
             if let Some(updated) = wizard(paths, Some(profile))? {
                 if updated.run_now {
                     let _ = run_profile_session(paths, updated.profile)?;
@@ -712,17 +756,35 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
 }
 
 fn live_sampler_flow(paths: &AppPaths) -> Result<()> {
-    let duration = prompt_parse::<u64>("Sampler duration seconds")?;
-    let interval = prompt_parse::<u64>("Sample interval milliseconds")?;
+    let duration =
+        match prompt_u64_in_range("Sampler duration seconds [recommended 60]", 60, 1, 86_400)? {
+            WizardInput::Value(value) => value,
+            WizardInput::Back | WizardInput::Cancel => return Ok(()),
+        };
+    let interval = match prompt_u64_in_range(
+        "Sample interval milliseconds [recommended 1000]",
+        1000,
+        100,
+        60_000,
+    )? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(()),
+    };
     let _ = run_diag_sample(paths, duration, interval)?;
     Ok(())
 }
 
 fn deep_trace_flow(paths: &AppPaths) -> Result<()> {
-    let duration = prompt_parse::<u64>("Deep trace duration seconds")?;
-    let fallback = parse_yes_no(&prompt(
-        "Fallback to sampler if deep trace unavailable? [y/n]",
-    )?)?;
+    let duration =
+        match prompt_u64_in_range("Deep trace duration seconds [recommended 30]", 30, 1, 3_600)? {
+            WizardInput::Value(value) => value,
+            WizardInput::Back | WizardInput::Cancel => return Ok(()),
+        };
+    let fallback =
+        match prompt_bool_default("Fallback to sampler if deep trace unavailable?", true)? {
+            WizardInput::Value(value) => value,
+            WizardInput::Back | WizardInput::Cancel => return Ok(()),
+        };
     let _ = run_diag_trace(paths, duration, fallback)?;
     Ok(())
 }
@@ -745,7 +807,15 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
     for (index, session) in sessions.iter().enumerate() {
         println!("{}. {}", index + 1, session);
     }
-    let choice = prompt_parse::<usize>("Select session number or 0 to go back")?;
+    let choice = match prompt_usize_in_range(
+        &format!("Select session number [0-{}]", sessions.len()),
+        1,
+        0,
+        sessions.len(),
+    )? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(()),
+    };
     if choice == 0 || choice > sessions.len() {
         return Ok(());
     }
@@ -755,20 +825,20 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
     println!("3. Export CSV");
     println!("4. Export HTML");
     println!("5. Back");
-    match prompt("Choose action")?.as_str() {
-        "1" => {
+    match prompt_menu_default("Choose action [1-5]", "1", &["1", "2", "3", "4", "5"])? {
+        WizardInput::Value(value) if value == "1" => {
             run_report(paths, session_id)?;
             pause()?;
         }
-        "2" => {
+        WizardInput::Value(value) if value == "2" => {
             run_export(paths, session_id, ExportFormat::Json)?;
             pause()?;
         }
-        "3" => {
+        WizardInput::Value(value) if value == "3" => {
             run_export(paths, session_id, ExportFormat::Csv)?;
             pause()?;
         }
-        "4" => {
+        WizardInput::Value(value) if value == "4" => {
             run_export(paths, session_id, ExportFormat::Html)?;
             pause()?;
         }
@@ -833,22 +903,6 @@ fn session_id() -> String {
     )
 }
 
-fn prompt(label: &str) -> Result<String> {
-    loop {
-        print!("{}: ", label);
-        io::stdout().flush()?;
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input)? == 0 {
-            bail!("input closed");
-        }
-        let trimmed = input.trim().to_string();
-        if !trimmed.is_empty() {
-            return Ok(trimmed);
-        }
-        println!("Input cannot be empty");
-    }
-}
-
 fn prompt_string_default(label: &str, default: Option<&str>) -> Result<WizardInput<String>> {
     loop {
         match default {
@@ -875,23 +929,6 @@ fn prompt_string_default(label: &str, default: Option<&str>) -> Result<WizardInp
             continue;
         }
         return Ok(WizardInput::Value(trimmed.to_string()));
-    }
-}
-
-fn prompt_parse<T>(label: &str) -> Result<T>
-where
-    T: std::str::FromStr,
-    <T as std::str::FromStr>::Err: std::fmt::Display,
-{
-    loop {
-        let value = prompt(label)?;
-        if value == "cancel" {
-            bail!("cancelled");
-        }
-        match value.parse::<T>() {
-            Ok(parsed) => return Ok(parsed),
-            Err(err) => println!("Invalid value: {}", err),
-        }
     }
 }
 
@@ -997,7 +1034,10 @@ fn choose_file_target_path() -> Result<WizardInput<String>> {
             println!("{}. {}{}", index + 1, option.display(), suffix);
         }
         println!("{}. Enter path manually", options.len() + 1);
-        match prompt_string_default("Select file target", Some("1"))? {
+        match prompt_string_default(
+            &format!("Select file target [0-{}]", options.len() + 1),
+            Some("1"),
+        )? {
             WizardInput::Value(value) => {
                 let Ok(choice) = value.parse::<usize>() else {
                     println!("Invalid choice");
@@ -1060,7 +1100,18 @@ fn choose_device_path(
         if allow_manual {
             println!("{}. Enter path manually", manual_index);
         }
-        match prompt_string_default(title, Some("1"))? {
+        match prompt_string_default(
+            &format!(
+                "{} [0-{}]",
+                title,
+                if allow_manual {
+                    manual_index
+                } else {
+                    visible_devices.len()
+                }
+            ),
+            Some("1"),
+        )? {
             WizardInput::Value(value) => {
                 let Ok(choice) = value.parse::<usize>() else {
                     println!("Invalid choice");
@@ -1178,14 +1229,17 @@ fn wizard_target_hints(profile: &Profile) -> WizardTargetHints {
         }
         TargetMode::FileBased => {
             let metadata = fs::metadata(&profile.target.path).ok();
-            let size_bytes = metadata
+            let existing_size = metadata
                 .as_ref()
                 .filter(|meta| meta.is_file())
                 .map(|meta| meta.len());
+            let size_bytes = existing_size.or(profile.target.create_if_missing_size_bytes);
             let status = if metadata.as_ref().is_some_and(|meta| meta.is_dir()) {
                 "directory path"
-            } else if size_bytes.is_some() {
+            } else if existing_size.is_some() {
                 "existing file"
+            } else if profile.target.create_if_missing_size_bytes.is_some() {
+                "runtime-created if missing"
             } else {
                 "new file"
             };
@@ -1219,6 +1273,22 @@ fn normalize_file_target_path(mode: &TargetMode, path: PathBuf) -> PathBuf {
 fn apply_wizard_assumptions(profile: &mut Profile, hints: &WizardTargetHints) {
     profile.target.path =
         normalize_file_target_path(&profile.target.mode, profile.target.path.clone());
+    if profile.target.mode == TargetMode::FileBased {
+        if profile.target.path.exists() {
+            profile.target.create_if_missing_size_bytes = None;
+        } else {
+            let minimum = minimum_runtime_file_size(profile, hints.logical_sector_size);
+            let suggested = suggested_runtime_file_size(profile, hints);
+            let selected = profile
+                .target
+                .create_if_missing_size_bytes
+                .unwrap_or(suggested)
+                .max(minimum);
+            profile.target.create_if_missing_size_bytes = Some(selected);
+        }
+    } else {
+        profile.target.create_if_missing_size_bytes = None;
+    }
     if !profile.is_write_workload() {
         profile.workload.verify = false;
         profile.verification.enabled = false;
@@ -1265,6 +1335,57 @@ fn suggested_worker_count() -> usize {
         .map(usize::from)
         .unwrap_or(1)
         .clamp(1, 8)
+}
+
+fn minimum_runtime_file_size(profile: &Profile, logical_sector_size: u64) -> u64 {
+    let block = profile.workload.block_size_bytes.max(4096) as u64;
+    let sector = logical_sector_size.max(512);
+    let required = match profile.addressing.mode {
+        AddressingMode::WholeSelectedRange => 64 * 1024 * 1024,
+        AddressingMode::SectorRange => profile
+            .addressing
+            .start_sector
+            .unwrap_or(0)
+            .saturating_add(profile.addressing.sector_count.unwrap_or(0))
+            .saturating_mul(sector),
+        AddressingMode::ByteRange => profile
+            .addressing
+            .start_offset_bytes
+            .unwrap_or(0)
+            .saturating_add(profile.addressing.range_size_bytes.unwrap_or(0)),
+    };
+    required.max(block).max(sector)
+}
+
+fn suggested_runtime_file_size(profile: &Profile, hints: &WizardTargetHints) -> u64 {
+    let minimum = minimum_runtime_file_size(profile, hints.logical_sector_size);
+    if let Some(existing) = hints.size_bytes {
+        return existing.max(minimum);
+    }
+    let safe_free = maximum_runtime_file_size(&profile.target.path)
+        .map(|bytes| (bytes / 10).max(minimum))
+        .unwrap_or(1024 * 1024 * 1024);
+    safe_free.clamp(minimum, (4 * 1024 * 1024 * 1024_u64).max(minimum))
+}
+
+fn maximum_runtime_file_size(path: &Path) -> Option<u64> {
+    let base = if path.exists() {
+        path
+    } else {
+        path.parent().unwrap_or(Path::new("."))
+    };
+    available_space_bytes(base)
+}
+
+fn available_space_bytes(path: &Path) -> Option<u64> {
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let stat = unsafe { stat.assume_init() };
+    Some((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
 }
 
 fn range_hint_label(hints: &WizardTargetHints) -> String {
