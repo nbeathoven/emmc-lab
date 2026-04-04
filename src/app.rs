@@ -5,10 +5,11 @@ use crate::profile::{AddressingMode, DurabilityMode, Profile, TargetMode, Worklo
 use crate::report::{export_session, terminal_summary, ExportFormat};
 use crate::storage::{infer_profile_path, list_profiles, list_sessions, load_session, save_session, SessionRecord};
 use crate::system::{
-    assess_raw_target_safety, collect_capabilities, collect_system_snapshot, doctor, list_devices, AppPaths,
+    assess_raw_target_safety, collect_capabilities, collect_system_snapshot, doctor, list_devices, AppPaths, DeviceInfo,
 };
 use anyhow::{bail, Result};
 use chrono::Utc;
+use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -249,7 +250,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             0 => prompt(
                 "Test mode [1=raw device, 2=file-based] (type 'back' or 'cancel')",
             )?,
-            1 => prompt("Target path")?,
+            1 => prompt_target_path(&profile.target.mode)?,
             2 => prompt("Test type [1=randread, 2=randwrite, 3=randrw, 4=read, 5=write]")?,
             3 => prompt(
                 "Addressing [1=whole range, 2=start sector + sector count, 3=start offset bytes + range bytes]",
@@ -471,17 +472,11 @@ fn deep_trace_flow(paths: &AppPaths) -> Result<()> {
 
 fn health_flow(paths: &AppPaths) -> Result<()> {
     let devices = list_devices()?;
-    for device in &devices {
-        println!(
-            "{} mounted={} root={} model={:?}",
-            device.path.display(),
-            device.mounted,
-            device.is_root_device,
-            device.model
-        );
-    }
-    let target = prompt("Device path to inspect")?;
-    run_health(paths, Path::new(&target))
+    let target = choose_device_path(&devices, "Select device to inspect", true)?;
+    let Some(target) = target else {
+        return Ok(());
+    };
+    run_health(paths, &target)
 }
 
 fn reports_flow(paths: &AppPaths) -> Result<()> {
@@ -615,6 +610,138 @@ where
     }
 }
 
+fn prompt_target_path(mode: &TargetMode) -> Result<String> {
+    match mode {
+        TargetMode::RawDevice => {
+            let devices = preferred_devices(list_devices()?);
+            let selected = choose_device_path(&devices, "Select raw target device", true)?;
+            match selected {
+                Some(path) => Ok(path.display().to_string()),
+                None => Ok("back".to_string()),
+            }
+        }
+        TargetMode::FileBased => choose_file_target_path(),
+    }
+}
+
+fn choose_file_target_path() -> Result<String> {
+    let mut options = Vec::new();
+    options.push(PathBuf::from("/tmp/emmc-lab.bin"));
+    if let Ok(home) = env::var("HOME") {
+        options.push(PathBuf::from(home).join("emmc-lab.bin"));
+    }
+    if let Ok(cwd) = env::current_dir() {
+        options.push(cwd.join("emmc-lab.bin"));
+    }
+    options.dedup();
+
+    loop {
+        println!("0. Back");
+        for (index, option) in options.iter().enumerate() {
+            println!("{}. {}", index + 1, option.display());
+        }
+        println!("{}. Enter path manually", options.len() + 1);
+        let choice = prompt_parse::<usize>("Select file target")?;
+        if choice == 0 {
+            return Ok("back".to_string());
+        }
+        if choice <= options.len() {
+            return Ok(options[choice - 1].display().to_string());
+        }
+        if choice == options.len() + 1 {
+            return prompt("Enter file path");
+        }
+        println!("Invalid choice");
+    }
+}
+
+fn choose_device_path(
+    devices: &[DeviceInfo],
+    title: &str,
+    allow_manual: bool,
+) -> Result<Option<PathBuf>> {
+    let devices = preferred_devices(devices.to_vec());
+    let primary_devices = devices
+        .iter()
+        .filter(|device| !is_auxiliary_device(device))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut show_all = primary_devices.is_empty();
+    loop {
+        let visible_devices = if show_all {
+            &devices
+        } else {
+            &primary_devices
+        };
+        println!("0. Back");
+        for (index, device) in visible_devices.iter().enumerate() {
+            println!(
+                "{}. {} mounted={} root={} model={:?}",
+                index + 1,
+                device.path.display(),
+                device.mounted,
+                device.is_root_device,
+                device.model
+            );
+        }
+        let mut next_index = visible_devices.len() + 1;
+        let show_all_index = if !show_all && primary_devices.len() < devices.len() {
+            println!("{}. Show all devices", next_index);
+            let idx = next_index;
+            next_index += 1;
+            Some(idx)
+        } else {
+            None
+        };
+        let manual_index = next_index;
+        if allow_manual {
+            println!("{}. Enter path manually", manual_index);
+        }
+        let choice = prompt_parse::<usize>(title)?;
+        if choice == 0 {
+            return Ok(None);
+        }
+        if choice <= visible_devices.len() {
+            return Ok(Some(visible_devices[choice - 1].path.clone()));
+        }
+        if show_all_index == Some(choice) {
+            show_all = true;
+            continue;
+        }
+        if allow_manual && choice == manual_index {
+            return Ok(Some(PathBuf::from(prompt("Enter device path")?)));
+        }
+        println!("Invalid choice");
+    }
+}
+
+fn preferred_devices(mut devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    devices.sort_by(|a, b| device_rank(a).cmp(&device_rank(b)).then_with(|| a.name.cmp(&b.name)));
+    devices
+}
+
+fn device_rank(device: &DeviceInfo) -> (u8, u8, u8) {
+    let name = device.name.as_str();
+    let family = if name.starts_with("mmcblk") {
+        0
+    } else if name.starts_with("nvme") || name.starts_with("sd") {
+        1
+    } else if name.starts_with("loop") {
+        3
+    } else if name.starts_with("ram") {
+        4
+    } else {
+        2
+    };
+    let mounted = if device.mounted { 0 } else { 1 };
+    let root = if device.is_root_device { 1 } else { 0 };
+    (family, mounted, root)
+}
+
+fn is_auxiliary_device(device: &DeviceInfo) -> bool {
+    device.name.starts_with("loop") || device.name.starts_with("ram")
+}
+
 fn parse_yes_no(value: &str) -> Result<bool> {
     match value.to_ascii_lowercase().as_str() {
         "y" | "yes" | "true" | "1" => Ok(true),
@@ -632,11 +759,50 @@ fn pause() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_yes_no;
+    use super::{device_rank, is_auxiliary_device, parse_yes_no};
+    use crate::system::DeviceInfo;
+    use std::path::PathBuf;
 
     #[test]
     fn parses_menu_booleans() {
         assert!(parse_yes_no("y").expect("yes"));
         assert!(!parse_yes_no("n").expect("no"));
+    }
+
+    #[test]
+    fn ranks_mmc_before_loop_and_ram() {
+        let mmc = DeviceInfo {
+            name: "mmcblk0".to_string(),
+            path: PathBuf::from("/dev/mmcblk0"),
+            ..DeviceInfo::default()
+        };
+        let loop0 = DeviceInfo {
+            name: "loop0".to_string(),
+            path: PathBuf::from("/dev/loop0"),
+            ..DeviceInfo::default()
+        };
+        let ram0 = DeviceInfo {
+            name: "ram0".to_string(),
+            path: PathBuf::from("/dev/ram0"),
+            ..DeviceInfo::default()
+        };
+        assert!(device_rank(&mmc) < device_rank(&loop0));
+        assert!(device_rank(&loop0) < device_rank(&ram0));
+    }
+
+    #[test]
+    fn detects_auxiliary_devices() {
+        let mmc = DeviceInfo {
+            name: "mmcblk0".to_string(),
+            path: PathBuf::from("/dev/mmcblk0"),
+            ..DeviceInfo::default()
+        };
+        let loop0 = DeviceInfo {
+            name: "loop0".to_string(),
+            path: PathBuf::from("/dev/loop0"),
+            ..DeviceInfo::default()
+        };
+        assert!(!is_auxiliary_device(&mmc));
+        assert!(is_auxiliary_device(&loop0));
     }
 }
