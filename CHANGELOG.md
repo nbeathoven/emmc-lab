@@ -2,6 +2,12 @@
 
 All notable changes to `emmc-lab` are documented in this file.
 
+## v0.2.2 - 2026-04-04
+
+- reduced wizard friction with default answers, typed target discovery, smarter assumptions, and range-aware prompts
+- added runtime discovery of MMC and SD target type, size, and logical sector size for device pickers and suggestions
+- prevented invalid file targets and late direct-I/O failures by normalizing directory paths and aligned block sizes during setup
+
 ## v0.2.1 - 2026-04-04
 
 - added a shared terminal UI renderer for session reports, health, doctor, settings, and device listings

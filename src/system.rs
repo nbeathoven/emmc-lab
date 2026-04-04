@@ -62,8 +62,10 @@ pub struct SystemSnapshot {
 pub struct DeviceInfo {
     pub path: PathBuf,
     pub name: String,
+    pub media_type: Option<String>,
     pub model: Option<String>,
     pub size_bytes: Option<u64>,
+    pub removable: Option<bool>,
     pub mounted: bool,
     pub mountpoints: Vec<String>,
     pub filesystem_types: Vec<String>,
@@ -224,9 +226,16 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
         let name = entry.file_name().to_string_lossy().to_string();
         let dev_path = PathBuf::from("/dev").join(&name);
         let model = read_trimmed(entry.path().join("device/model"));
+        let media_type = read_trimmed(entry.path().join("device/type"));
         let size_bytes = read_trimmed(entry.path().join("size"))
             .and_then(|s| s.parse::<u64>().ok())
             .map(|sectors| sectors.saturating_mul(512));
+        let removable =
+            read_trimmed(entry.path().join("removable")).and_then(|s| match s.as_str() {
+                "0" => Some(false),
+                "1" => Some(true),
+                _ => None,
+            });
         let logical_block_size = read_trimmed(entry.path().join("queue/logical_block_size"))
             .and_then(|s| s.parse::<u64>().ok());
         let major_minor = read_trimmed(entry.path().join("dev")).unwrap_or_default();
@@ -242,8 +251,10 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
         devices.push(DeviceInfo {
             path: dev_path.clone(),
             name,
+            media_type,
             model,
             size_bytes,
+            removable,
             mounted: !mountpoints.is_empty(),
             mountpoints,
             filesystem_types,

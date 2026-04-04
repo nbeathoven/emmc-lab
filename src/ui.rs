@@ -966,12 +966,18 @@ fn capability_rows(caps: &CapabilityReport) -> Vec<(String, String)> {
     ]
 }
 
-fn device_columns<'a>() -> [Column<'a>; 6] {
+fn device_columns<'a>() -> [Column<'a>; 7] {
     [
         Column {
             header: "Device",
             min: 10,
             max: 14,
+            align: Align::Left,
+        },
+        Column {
+            header: "Type",
+            min: 8,
+            max: 10,
             align: Align::Left,
         },
         Column {
@@ -1010,6 +1016,7 @@ fn device_columns<'a>() -> [Column<'a>; 6] {
 fn device_row(device: &DeviceInfo) -> Vec<String> {
     vec![
         device.path.display().to_string(),
+        device.media_type.clone().unwrap_or_else(|| "-".to_string()),
         opt_text(device.model.as_deref()),
         device
             .size_bytes

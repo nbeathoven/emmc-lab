@@ -238,6 +238,20 @@ impl Profile {
         if self.name.trim().is_empty() {
             bail!("profile name cannot be empty");
         }
+        if self.target.path.as_os_str().is_empty() {
+            bail!("target path cannot be empty");
+        }
+        if self.target.mode == TargetMode::FileBased
+            && self.target.path.exists()
+            && fs::metadata(&self.target.path)
+                .map(|metadata| metadata.is_dir())
+                .unwrap_or(false)
+        {
+            bail!(
+                "file-based target {} is a directory; provide a file path instead",
+                self.target.path.display()
+            );
+        }
         if self.workload.block_size_bytes == 0 {
             bail!("block_size_bytes must be > 0");
         }

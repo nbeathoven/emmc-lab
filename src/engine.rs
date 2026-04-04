@@ -273,6 +273,12 @@ fn prepare_target(profile: &Profile) -> Result<u64> {
             )
         }),
         TargetMode::FileBased => {
+            if profile.target.path.is_dir() {
+                bail!(
+                    "file-based target {} is a directory; provide a file path instead",
+                    profile.target.path.display()
+                );
+            }
             if !profile.target.path.exists() && profile.is_write_workload() {
                 if let Some(parent) = profile.target.path.parent() {
                     fs::create_dir_all(parent)?;
