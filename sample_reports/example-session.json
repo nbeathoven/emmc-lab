@@ -1,0 +1,104 @@
+{
+  "session_id": "20260404T010101-example",
+  "created_at": "2026-04-04T01:01:01Z",
+  "system": {
+    "collected_at": "2026-04-04T01:01:01Z",
+    "kernel_version": "6.6.31-v8+",
+    "hostname": "pi-lab",
+    "cpu_temperature_c": 51.2,
+    "cpu_frequency_mhz": 1800,
+    "mem_total_kb": 1966080,
+    "mem_available_kb": 1433600,
+    "load_average": "0.22 0.16 0.11"
+  },
+  "profile": null,
+  "run_summary": {
+    "backend": "pread_pwrite",
+    "started_at": "2026-04-04T01:01:02Z",
+    "ended_at": "2026-04-04T01:02:02Z",
+    "target_path": "/tmp/emmc-lab.bin",
+    "target_mode": "file_based",
+    "read_ios_completed": 820000,
+    "write_ios_completed": 180000,
+    "read_bytes_completed": 3358720000,
+    "write_bytes_completed": 737280000,
+    "failed_reads": 0,
+    "failed_writes": 0,
+    "partial_reads": 0,
+    "partial_writes": 0,
+    "retries": 0,
+    "verify_failures": 0,
+    "sync_failures": 0,
+    "read_latency": {
+      "p50_us": 128,
+      "p95_us": 512,
+      "p99_us": 1024,
+      "p999_us": 4096
+    },
+    "write_latency": {
+      "p50_us": 256,
+      "p95_us": 1024,
+      "p99_us": 2048,
+      "p999_us": 8192
+    },
+    "verify": {
+      "checksum_mismatch": 0,
+      "offset_mismatch": 0,
+      "stale_data": 0,
+      "short_read": 0,
+      "unexpected_eof": 0,
+      "verify_failure_count": 0,
+      "first_failure": null
+    },
+    "addressed_range_start_bytes": 0,
+    "addressed_range_length_bytes": 67108864,
+    "logical_sector_size": 512,
+    "notes": [
+      "Logical sector/LBA targeting only; this does not guarantee fixed physical NAND cell targeting."
+    ]
+  },
+  "interval_stats": [],
+  "health_before": null,
+  "health_after": null,
+  "diagnostics": {
+    "mode": "sample",
+    "session_id": "20260404T010101-example",
+    "started_at": "2026-04-04T01:01:02Z",
+    "ended_at": "2026-04-04T01:02:02Z",
+    "duration_seconds": 60,
+    "top_processes": [
+      {
+        "pid": 412,
+        "ppid": 1,
+        "user": "pi",
+        "command": "/usr/bin/postgres",
+        "exe_path": "/usr/bin/postgres",
+        "cwd": "/var/lib/postgresql",
+        "logical_read_bytes_per_sec": 524288.0,
+        "logical_write_bytes_per_sec": 131072.0,
+        "storage_read_bytes_per_sec": 262144.0,
+        "storage_write_bytes_per_sec": 65536.0,
+        "cancelled_write_bytes": 0,
+        "read_syscalls_per_sec": 122.0,
+        "write_syscalls_per_sec": 18.0,
+        "sync_count": 0,
+        "open_file_count": 24,
+        "hottest_file": "/var/lib/postgresql/data/base/12345/67890",
+        "hottest_directory": "/var/lib/postgresql/data/base/12345",
+        "observed_share_percent": 64.5
+      }
+    ],
+    "top_files": [],
+    "top_directories": [],
+    "device_totals": [],
+    "unresolved_path_count": 0,
+    "dropped_event_count": 0,
+    "attribution_note": "Logical syscall bytes (rchar/wchar) and storage-layer bytes (read_bytes/write_bytes) are reported separately.",
+    "fallback_message": null
+  },
+  "notes": [
+    "Possible interference from a database service was observed during the run."
+  ],
+  "contamination_note": "Possible interference from concurrent I/O producers: pid=412 cmd=/usr/bin/postgres share=64.5%"
+}
+

@@ -1,0 +1,46 @@
+name: million-randwrite-range
+target:
+  mode: raw_device
+  path: /dev/mmcblk0
+workload:
+  test_type: randwrite
+  block_size_bytes: 4096
+  runtime_seconds:
+  exact_op_count: 1000000
+  queue_depth: 1
+  worker_count: 4
+  read_percentage: 0
+  random_seed: 42
+  direct_io: true
+  verify: true
+  sync_cadence_writes: 256
+  sync_cadence_ms: 250
+  report_interval_ms: 1000
+addressing:
+  mode: sector_range
+  start_sector: 2048
+  sector_count: 1048576
+  start_offset_bytes:
+  range_size_bytes:
+durability:
+  mode: batch_durable
+  fdatasync_at_end: true
+verification:
+  enabled: true
+telemetry:
+  health_telemetry: true
+diagnostics:
+  capture_during_test: true
+  deep_trace: false
+  sample_interval_ms: 1000
+reporting:
+  export_json: true
+  export_csv: true
+  export_html: true
+  notes:
+    - Exact-count logical LBA write run for endurance characterization.
+    - This profile is destructive on the selected logical sector range.
+safety:
+  destructive_confirmation_required: true
+  confirmation_flag: false
+

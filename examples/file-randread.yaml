@@ -1,0 +1,44 @@
+name: file-randread
+target:
+  mode: file_based
+  path: /tmp/emmc-lab-randread.bin
+workload:
+  test_type: randread
+  block_size_bytes: 4096
+  runtime_seconds: 30
+  exact_op_count:
+  queue_depth: 1
+  worker_count: 2
+  read_percentage: 100
+  random_seed: 12345
+  direct_io: false
+  verify: false
+  sync_cadence_writes: 1024
+  sync_cadence_ms: 1000
+  report_interval_ms: 1000
+addressing:
+  mode: whole_selected_range
+  start_sector:
+  sector_count:
+  start_offset_bytes: 0
+  range_size_bytes:
+durability:
+  mode: performance
+  fdatasync_at_end: true
+verification:
+  enabled: false
+telemetry:
+  health_telemetry: false
+diagnostics:
+  capture_during_test: false
+  deep_trace: false
+  sample_interval_ms: 1000
+reporting:
+  export_json: true
+  export_csv: true
+  export_html: true
+  notes: []
+safety:
+  destructive_confirmation_required: true
+  confirmation_flag: false
+

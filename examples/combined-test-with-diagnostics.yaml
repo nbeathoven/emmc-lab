@@ -1,0 +1,44 @@
+name: combined-test-with-diagnostics
+target:
+  mode: file_based
+  path: /tmp/emmc-lab-combined.bin
+workload:
+  test_type: randrw
+  block_size_bytes: 4096
+  runtime_seconds: 60
+  exact_op_count:
+  queue_depth: 1
+  worker_count: 2
+  read_percentage: 60
+  random_seed: 9001
+  direct_io: false
+  verify: true
+  sync_cadence_writes: 128
+  sync_cadence_ms: 500
+  report_interval_ms: 1000
+addressing:
+  mode: byte_range
+  start_sector:
+  sector_count:
+  start_offset_bytes: 0
+  range_size_bytes: 67108864
+durability:
+  mode: batch_durable
+  fdatasync_at_end: true
+verification:
+  enabled: true
+telemetry:
+  health_telemetry: false
+diagnostics:
+  capture_during_test: true
+  deep_trace: false
+  sample_interval_ms: 1000
+reporting:
+  export_json: true
+  export_csv: true
+  export_html: true
+  notes:
+    - Combined workload and live sampler session for interference detection.
+safety:
+  destructive_confirmation_required: true
+  confirmation_flag: false
