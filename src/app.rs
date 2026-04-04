@@ -1275,8 +1275,35 @@ fn range_hint_label(hints: &WizardTargetHints) -> String {
 }
 
 fn device_selection_label(device: &DeviceInfo) -> String {
+    let mount_info = if device.mountpoints.is_empty() {
+        "not mounted".to_string()
+    } else {
+        device
+            .mountpoints
+            .iter()
+            .enumerate()
+            .map(|(index, mountpoint)| {
+                let fs_type = device
+                    .filesystem_types
+                    .get(index)
+                    .map(String::as_str)
+                    .unwrap_or("?");
+                let options = device
+                    .mount_options
+                    .get(index)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                if options.is_empty() {
+                    format!("{mountpoint} [{fs_type}]")
+                } else {
+                    format!("{mountpoint} [{fs_type} {options}]")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     format!(
-        "{} [{}{}, sector {} B, mounted={}, root={}]",
+        "{} [{}{}, sector {} B, {}, root={}]",
         device.path.display(),
         device
             .media_type
@@ -1287,7 +1314,7 @@ fn device_selection_label(device: &DeviceInfo) -> String {
             .map(|size| format!(", {}", format_bytes(size)))
             .unwrap_or_default(),
         device.logical_block_size.unwrap_or(512),
-        device.mounted,
+        mount_info,
         device.is_root_device
     )
 }

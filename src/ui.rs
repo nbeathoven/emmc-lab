@@ -65,6 +65,20 @@ impl Ui {
         format!("{} {}\n", self.paint(label, "1;33"), sanitize_inline(value))
     }
 
+    fn flow(&self, sections: &[String]) -> String {
+        sections
+            .iter()
+            .filter(|section| !section.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    fn pair(&self, left: String, right: String) -> String {
+        self.side_by_side(&left, &right)
+            .unwrap_or_else(|| self.flow(&[left, right]))
+    }
+
     fn kv_table(&self, title: &str, rows: &[(String, String)]) -> String {
         let key_width = rows
             .iter()
@@ -207,6 +221,41 @@ impl Ui {
             value.to_string()
         }
     }
+
+    fn side_by_side(&self, left: &str, right: &str) -> Option<String> {
+        let gap = 2;
+        let left_lines = left.lines().map(str::to_string).collect::<Vec<_>>();
+        let right_lines = right.lines().map(str::to_string).collect::<Vec<_>>();
+        let left_width = left_lines
+            .iter()
+            .map(|line| visible_width(line))
+            .max()
+            .unwrap_or(0);
+        let right_width = right_lines
+            .iter()
+            .map(|line| visible_width(line))
+            .max()
+            .unwrap_or(0);
+        if left_width == 0 || right_width == 0 || left_width + gap + right_width > self.width {
+            return None;
+        }
+
+        let line_count = left_lines.len().max(right_lines.len());
+        let mut out = String::new();
+        for index in 0..line_count {
+            let left_line = left_lines.get(index).map(String::as_str).unwrap_or("");
+            let right_line = right_lines.get(index).map(String::as_str).unwrap_or("");
+            let left_pad = left_width.saturating_sub(visible_width(left_line));
+            let _ = writeln!(
+                &mut out,
+                "{}{}{}",
+                left_line,
+                " ".repeat(left_pad + gap),
+                right_line
+            );
+        }
+        Some(out)
+    }
 }
 
 pub fn render_session_summary(record: &SessionRecord) -> String {
@@ -235,7 +284,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
     if let Some(profile) = &record.profile {
         session_rows.push(("Profile".to_string(), profile.name.clone()));
     }
-    out.push_str(&ui.kv_table("Session", &session_rows));
+    let session_panel = ui.kv_table("Session", &session_rows);
 
     if let Some(run) = &record.run_summary {
         let run_rows = vec![
@@ -254,7 +303,8 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 ),
             ),
         ];
-        out.push_str(&ui.kv_table("Run Metadata", &run_rows));
+        let run_meta_panel = ui.kv_table("Run Metadata", &run_rows);
+        out.push_str(&ui.pair(session_panel, run_meta_panel));
 
         let run_table = vec![
             vec![
@@ -298,7 +348,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 fmt_us(run.write_latency.p999_us),
             ],
         ];
-        out.push_str(&ui.table(
+        let run_perf_panel = ui.table(
             "Run Performance",
             &[
                 Column {
@@ -321,7 +371,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 },
             ],
             &run_table,
-        ));
+        );
 
         let reliability_rows = vec![
             ("Retries".to_string(), run.retries.to_string()),
@@ -340,7 +390,8 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 run.verify.unexpected_eof.to_string(),
             ),
         ];
-        out.push_str(&ui.kv_table("Reliability", &reliability_rows));
+        let reliability_panel = ui.kv_table("Reliability", &reliability_rows);
+        out.push_str(&ui.pair(run_perf_panel, reliability_panel));
         if let Some(first_failure) = &run.verify.first_failure {
             out.push_str(&ui.note(
                 "Verify failure:",
@@ -354,9 +405,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 ),
             ));
         }
-    }
-
-    if let Some(diag) = &record.diagnostics {
+    } else if let Some(diag) = &record.diagnostics {
         let diag_rows = vec![
             (
                 "Mode".to_string(),
@@ -387,7 +436,45 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 diag.dropped_event_count.to_string(),
             ),
         ];
-        out.push_str(&ui.kv_table("Diagnostics", &diag_rows));
+        out.push_str(&ui.pair(session_panel, ui.kv_table("Diagnostics", &diag_rows)));
+    } else {
+        out.push_str(&session_panel);
+    }
+
+    if let Some(diag) = &record.diagnostics {
+        if record.run_summary.is_some() {
+            let diag_rows = vec![
+                (
+                    "Mode".to_string(),
+                    format!("{:?}", diag.mode).to_lowercase(),
+                ),
+                ("Started".to_string(), diag.started_at.to_rfc3339()),
+                ("Ended".to_string(), diag.ended_at.to_rfc3339()),
+                (
+                    "Duration".to_string(),
+                    format!("{} s", diag.duration_seconds),
+                ),
+                (
+                    "Observed".to_string(),
+                    format!(
+                        "{} processes, {} files, {} directories, {} devices",
+                        diag.top_processes.len(),
+                        diag.top_files.len(),
+                        diag.top_directories.len(),
+                        diag.device_totals.len()
+                    ),
+                ),
+                (
+                    "Unresolved Paths".to_string(),
+                    diag.unresolved_path_count.to_string(),
+                ),
+                (
+                    "Dropped Events".to_string(),
+                    diag.dropped_event_count.to_string(),
+                ),
+            ];
+            out.push_str(&ui.kv_table("Diagnostics", &diag_rows));
+        }
         out.push_str(&ui.note(
             "Attribution:",
             "Logical syscall bytes and storage-layer bytes are reported separately.",
@@ -416,7 +503,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
             })
             .collect::<Vec<_>>();
         if !process_rows.is_empty() {
-            out.push_str(&ui.table(
+            let processes_panel = ui.table(
                 "Top Processes",
                 &[
                     Column {
@@ -469,7 +556,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     },
                 ],
                 &process_rows,
-            ));
+            );
 
             let path_rows = diag
                 .top_processes
@@ -485,7 +572,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     ]
                 })
                 .collect::<Vec<_>>();
-            out.push_str(&ui.table(
+            let path_panel = ui.table(
                 "Process Paths",
                 &[
                     Column {
@@ -520,7 +607,8 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     },
                 ],
                 &path_rows,
-            ));
+            );
+            out.push_str(&ui.pair(processes_panel, path_panel));
         }
 
         let file_rows = diag
@@ -758,7 +846,7 @@ pub fn render_health_report(report: &HealthReport) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB HEALTH");
     let system_rows = system_rows(&report.system);
-    out.push_str(&ui.kv_table("System", &system_rows));
+    let system_panel = ui.kv_table("System", &system_rows);
     let emmc_rows = vec![
         (
             "Device".to_string(),
@@ -785,7 +873,8 @@ pub fn render_health_report(report: &HealthReport) -> String {
             opt_text(report.emmc.pre_eol_info.as_deref()),
         ),
     ];
-    out.push_str(&ui.kv_table("eMMC Health", &emmc_rows));
+    let health_panel = ui.kv_table("eMMC Health", &emmc_rows);
+    out.push_str(&ui.pair(system_panel, health_panel));
     out.push_str(&ui.note("Note:", &report.emmc.note));
     if let Some(raw) = &report.emmc.raw_text {
         out.push_str(&ui.note(
@@ -801,7 +890,7 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB DOCTOR");
     let generated = vec![("Generated".to_string(), report.generated_at.to_rfc3339())];
-    out.push_str(&ui.kv_table("Run", &generated));
+    let run_panel = ui.kv_table("Run", &generated);
     let check_rows = report
         .checks
         .iter()
@@ -817,6 +906,8 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
             ]
         })
         .collect::<Vec<_>>();
+    let capabilities_panel = ui.kv_table("Capabilities", &capability_rows(&report.capabilities));
+    out.push_str(&ui.pair(run_panel, capabilities_panel));
     out.push_str(&ui.table(
         "Checks",
         &[
@@ -841,7 +932,6 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
         ],
         &check_rows,
     ));
-    out.push_str(&ui.kv_table("Capabilities", &capability_rows(&report.capabilities)));
 
     let visible_devices = primary_devices(&report.devices);
     let hidden_count = report.devices.len().saturating_sub(visible_devices.len());
@@ -890,8 +980,9 @@ pub fn render_settings(
             paths.samples_dir.display().to_string(),
         ),
     ];
-    out.push_str(&ui.kv_table("Paths", &path_rows));
-    out.push_str(&ui.kv_table("System", &system_rows(system)));
+    let paths_panel = ui.kv_table("Paths", &path_rows);
+    let system_panel = ui.kv_table("System", &system_rows(system));
+    out.push_str(&ui.pair(paths_panel, system_panel));
     out.push_str(&ui.kv_table("Capabilities", &capability_rows(caps)));
     out
 }
@@ -1024,12 +1115,37 @@ fn device_row(device: &DeviceInfo) -> Vec<String> {
             .unwrap_or_else(|| "-".to_string()),
         bool_label(device.mounted),
         bool_label(device.is_root_device),
-        if device.mountpoints.is_empty() {
-            "-".to_string()
-        } else {
-            device.mountpoints.join(", ")
-        },
+        mount_summary(device),
     ]
+}
+
+fn mount_summary(device: &DeviceInfo) -> String {
+    if device.mountpoints.is_empty() {
+        return "-".to_string();
+    }
+    device
+        .mountpoints
+        .iter()
+        .enumerate()
+        .map(|(index, mountpoint)| {
+            let fs_type = device
+                .filesystem_types
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or("?");
+            let options = device
+                .mount_options
+                .get(index)
+                .map(String::as_str)
+                .unwrap_or("");
+            if options.is_empty() {
+                format!("{mountpoint} [{fs_type}]")
+            } else {
+                format!("{mountpoint} [{fs_type} {options}]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn primary_devices(devices: &[DeviceInfo]) -> Vec<DeviceInfo> {
@@ -1113,6 +1229,24 @@ fn sanitize_inline(value: &str) -> String {
         .join(" ")
 }
 
+fn visible_width(value: &str) -> usize {
+    let mut width = 0;
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            while let Some(next) = chars.next() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+        width += 1;
+    }
+    width
+}
+
 fn opt_text(value: Option<&str>) -> String {
     value
         .filter(|value| !value.is_empty())
@@ -1172,7 +1306,7 @@ fn fmt_us(value: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{truncate_text, Align, Column, Ui};
+    use super::{truncate_text, visible_width, Align, Column, Ui};
 
     #[test]
     fn truncates_with_ascii_ellipsis() {
@@ -1215,5 +1349,24 @@ mod tests {
         );
         let widest = rendered.lines().map(str::len).max().unwrap_or(0);
         assert!(widest <= 72);
+    }
+
+    #[test]
+    fn computes_visible_width_without_ansi_sequences() {
+        assert_eq!(visible_width("\u{1b}[1;36mhello\u{1b}[0m"), 5);
+    }
+
+    #[test]
+    fn joins_panels_horizontally_when_they_fit() {
+        let ui = Ui {
+            width: 120,
+            color: false,
+        };
+        let left = ui.kv_table("Left", &[("A".to_string(), "1".to_string())]);
+        let right = ui.kv_table("Right", &[("B".to_string(), "2".to_string())]);
+        let joined = ui.pair(left.clone(), right.clone());
+        assert!(joined.contains("Left"));
+        assert!(joined.contains("Right"));
+        assert!(!joined.starts_with(&format!("{}{}", left, right)));
     }
 }

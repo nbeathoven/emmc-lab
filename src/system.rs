@@ -69,6 +69,7 @@ pub struct DeviceInfo {
     pub mounted: bool,
     pub mountpoints: Vec<String>,
     pub filesystem_types: Vec<String>,
+    pub mount_options: Vec<String>,
     pub is_root_device: bool,
     pub logical_block_size: Option<u64>,
 }
@@ -110,6 +111,7 @@ struct MountInfo {
     source: String,
     mountpoint: String,
     fs_type: String,
+    mount_options: String,
     major_minor: String,
 }
 
@@ -241,12 +243,14 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
         let major_minor = read_trimmed(entry.path().join("dev")).unwrap_or_default();
         let mut mountpoints = Vec::new();
         let mut filesystem_types = Vec::new();
+        let mut mount_options = Vec::new();
         for mount in mounts
             .iter()
             .filter(|m| m.source == dev_path.display().to_string() || m.major_minor == major_minor)
         {
             mountpoints.push(mount.mountpoint.clone());
             filesystem_types.push(mount.fs_type.clone());
+            mount_options.push(mount.mount_options.clone());
         }
         devices.push(DeviceInfo {
             path: dev_path.clone(),
@@ -258,6 +262,7 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
             mounted: !mountpoints.is_empty(),
             mountpoints,
             filesystem_types,
+            mount_options,
             is_root_device: root_source
                 .as_ref()
                 .map(|root| root == &dev_path.display().to_string())
@@ -412,13 +417,19 @@ fn parse_mountinfo() -> Result<Vec<MountInfo>> {
         };
         let left_parts: Vec<&str> = left.split_whitespace().collect();
         let right_parts: Vec<&str> = right.split_whitespace().collect();
-        if left_parts.len() < 5 || right_parts.len() < 3 {
+        if left_parts.len() < 6 || right_parts.len() < 3 {
             continue;
         }
+        let merged_options = if right_parts[2].is_empty() {
+            left_parts[5].to_string()
+        } else {
+            format!("{},{}", left_parts[5], right_parts[2])
+        };
         mounts.push(MountInfo {
             major_minor: left_parts[2].to_string(),
             mountpoint: left_parts[4].to_string(),
             fs_type: right_parts[0].to_string(),
+            mount_options: merged_options,
             source: right_parts[1].to_string(),
         });
     }
