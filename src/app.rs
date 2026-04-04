@@ -504,10 +504,22 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
     println!("4. Export HTML");
     println!("5. Back");
     match prompt("Choose action")?.as_str() {
-        "1" => run_report(paths, session_id)?,
-        "2" => run_export(paths, session_id, ExportFormat::Json)?,
-        "3" => run_export(paths, session_id, ExportFormat::Csv)?,
-        "4" => run_export(paths, session_id, ExportFormat::Html)?,
+        "1" => {
+            run_report(paths, session_id)?;
+            pause()?;
+        }
+        "2" => {
+            run_export(paths, session_id, ExportFormat::Json)?;
+            pause()?;
+        }
+        "3" => {
+            run_export(paths, session_id, ExportFormat::Csv)?;
+            pause()?;
+        }
+        "4" => {
+            run_export(paths, session_id, ExportFormat::Html)?;
+            pause()?;
+        }
         _ => {}
     }
     Ok(())
@@ -609,6 +621,13 @@ fn parse_yes_no(value: &str) -> Result<bool> {
         "n" | "no" | "false" | "0" => Ok(false),
         _ => bail!("expected yes/no"),
     }
+}
+
+fn pause() -> Result<()> {
+    println!("Press Enter to continue...");
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(())
 }
 
 #[cfg(test)]

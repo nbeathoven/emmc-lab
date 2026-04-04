@@ -86,6 +86,14 @@ pub fn terminal_summary(record: &SessionRecord) -> String {
             "Diagnostics: mode={:?} duration={}s unresolved_paths={} dropped_events={}",
             diag.mode, diag.duration_seconds, diag.unresolved_path_count, diag.dropped_event_count
         );
+        let _ = writeln!(
+            &mut out,
+            "Observed entities: processes={} files={} directories={} devices={}",
+            diag.top_processes.len(),
+            diag.top_files.len(),
+            diag.top_directories.len(),
+            diag.device_totals.len()
+        );
         if let Some(top) = diag.top_processes.first() {
             let _ = writeln!(
                 &mut out,
@@ -93,6 +101,68 @@ pub fn terminal_summary(record: &SessionRecord) -> String {
                 top.pid, top.command, top.storage_read_bytes_per_sec, top.storage_write_bytes_per_sec
             );
         }
+        if !diag.top_processes.is_empty() {
+            let _ = writeln!(&mut out, "Top processes:");
+            for p in diag.top_processes.iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- pid={} user={} cmd={} logical_r/s={:.1} logical_w/s={:.1} storage_r/s={:.1} storage_w/s={:.1}",
+                    p.pid,
+                    p.user,
+                    p.command,
+                    p.logical_read_bytes_per_sec,
+                    p.logical_write_bytes_per_sec,
+                    p.storage_read_bytes_per_sec,
+                    p.storage_write_bytes_per_sec
+                );
+            }
+        }
+        if !diag.top_files.is_empty() {
+            let _ = writeln!(&mut out, "Top files:");
+            for f in diag.top_files.iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- path={} read_bytes={} write_bytes={} read_ops={} write_ops={}",
+                    f.file_path,
+                    f.read_bytes,
+                    f.write_bytes,
+                    f.read_ops,
+                    f.write_ops
+                );
+            }
+        }
+        if !diag.top_directories.is_empty() {
+            let _ = writeln!(&mut out, "Top directories:");
+            for d in diag.top_directories.iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- path={} read_bytes={} write_bytes={} file_count={}",
+                    d.directory_path,
+                    d.total_read_bytes,
+                    d.total_write_bytes,
+                    d.file_count_touched
+                );
+            }
+        }
+        if !diag.device_totals.is_empty() {
+            let _ = writeln!(&mut out, "Device totals:");
+            for d in diag.device_totals.iter().take(5) {
+                let _ = writeln!(
+                    &mut out,
+                    "- device={} reads_completed={} writes_completed={} sectors_read={} sectors_written={} in_progress={}",
+                    d.device,
+                    d.reads_completed,
+                    d.writes_completed,
+                    d.sectors_read,
+                    d.sectors_written,
+                    d.current_ios_in_progress
+                );
+            }
+        }
+        if let Some(fallback) = &diag.fallback_message {
+            let _ = writeln!(&mut out, "Fallback: {}", fallback);
+        }
+        let _ = writeln!(&mut out, "Attribution note: {}", diag.attribution_note);
     }
     if let Some(note) = &record.contamination_note {
         let _ = writeln!(&mut out, "Interference note: {}", note);
