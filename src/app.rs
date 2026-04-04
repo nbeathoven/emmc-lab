@@ -260,7 +260,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         match step {
             0 => {
                 match prompt_menu_default(
-                    "Test mode [1=raw device, 2=file-based]",
+                    "Mode [1=raw, 2=file]",
                     target_mode_choice(&profile.target.mode),
                     &["1", "2"],
                 )? {
@@ -278,7 +278,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             2 => {
                 match prompt_menu_default(
-                    "Test type [1=randread, 2=randwrite, 3=randrw, 4=read, 5=write]",
+                    "Workload [1=randread, 2=randwrite, 3=randrw, 4=read, 5=write]",
                     workload_choice(&profile.workload.test_type),
                     &["1", "2", "3", "4", "5"],
                 )? {
@@ -305,7 +305,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                         normalize_file_target_path(&profile.target.mode, PathBuf::from(path));
                     profile.target.path = normalized;
                     let hints = wizard_target_hints(&profile);
-                    println!("Discovered target: {}", hints.target_label);
+                    println!("Target: {}", hints.target_label);
                     if profile.target.mode == TargetMode::FileBased
                         && !profile.target.path.exists()
                         && !profile.target.path.is_dir()
@@ -320,7 +320,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             .unwrap_or(default_size.saturating_mul(64).max(min_size));
                         match prompt_u64_in_range(
                             &format!(
-                                "Create file at runtime if missing bytes [recommended {}]",
+                                "Create file if missing [runtime, rec {} bytes]",
                                 format_bytes(default_size)
                             ),
                             default_size.clamp(min_size, max_size),
@@ -345,7 +345,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             3 => match prompt_menu_default(
                 &format!(
-                    "Addressing [1=whole range, 2=sector range, 3=byte range] [{}]",
+                    "Range [1=all, 2=sectors, 3=bytes] [{}]",
                     range_hint_label(&hints)
                 ),
                 addressing_choice(&profile.addressing.mode),
@@ -449,7 +449,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             4 => match prompt_menu_default(
-                "Stop condition [1=runtime seconds, 2=exact operation count]",
+                "Stop [1=time, 2=ops]",
                 stop_choice(profile.workload.exact_op_count.is_some()),
                 &["1", "2"],
             )? {
@@ -492,7 +492,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             5 => match prompt_usize_in_range(
                 &format!(
-                    "Block size bytes [recommended {}, range {}-1048576, sector {} B]",
+                    "Block size bytes [rec {}, {}-1048576, sector {} B]",
                     suggested_block_size(&hints),
                     hints.logical_sector_size.max(512),
                     hints.logical_sector_size
@@ -509,7 +509,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             6 => match prompt_u32_in_range(
-                "Queue depth [recommended 1-8]",
+                "Queue depth [rec 1-8]",
                 profile.workload.queue_depth.clamp(1, 8),
                 1,
                 64,
@@ -522,10 +522,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             7 => match prompt_usize_in_range(
-                &format!(
-                    "Number of workers [recommended 1-{}]",
-                    suggested_worker_count()
-                ),
+                &format!("Workers [rec 1-{}]", suggested_worker_count()),
                 profile
                     .workload
                     .worker_count
@@ -554,13 +551,12 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             9 => match prompt_bool_default(
                 &format!(
-                    "Direct I/O [recommended {} for {}]",
+                    "Direct I/O [rec {}]",
                     if profile.target.mode == TargetMode::RawDevice {
                         "y"
                     } else {
                         "n"
-                    },
-                    profile.target.mode
+                    }
                 ),
                 profile.workload.direct_io,
             )? {
@@ -575,12 +571,9 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 if !profile.is_write_workload() {
                     profile.workload.verify = false;
                     profile.verification.enabled = false;
-                    println!("Verification applies to write workloads only. Keeping it off.");
+                    println!("Verify: off for read workloads.");
                 } else {
-                    match prompt_bool_default(
-                        "Verification [recommended n unless validating writes]",
-                        profile.verification.enabled,
-                    )? {
+                    match prompt_bool_default("Verify [rec n]", profile.verification.enabled)? {
                         WizardInput::Value(enabled) => {
                             profile.workload.verify = enabled;
                             profile.verification.enabled = enabled;
@@ -596,10 +589,10 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             11 => {
                 if !profile.is_write_workload() {
                     profile.durability.mode = DurabilityMode::Performance;
-                    println!("Read workloads do not need a durability mode. Using performance.");
+                    println!("Durability: performance for read workloads.");
                 } else {
                     match prompt_menu_default(
-                        "Durability [1=performance, 2=batch durable, 3=strict durable]",
+                        "Durability [1=perf, 2=batch, 3=strict]",
                         durability_choice(&profile.durability.mode),
                         &["1", "2", "3"],
                     )? {
@@ -621,11 +614,11 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             12 => match prompt_bool_default(
                 &format!(
-                    "Health telemetry [{}]",
+                    "Health [{}]",
                     if hints.health_supported {
-                        "recommended y"
+                        "rec y"
                     } else {
-                        "recommended n for this target"
+                        "rec n"
                     }
                 ),
                 profile.telemetry.health_telemetry && hints.health_supported,
@@ -638,7 +631,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             13 => match prompt_bool_default(
-                "Diagnostic capture during test [recommended n unless checking interference]",
+                "Diag capture [rec n]",
                 profile.diagnostics.capture_during_test,
             )? {
                 WizardInput::Value(value) => profile.diagnostics.capture_during_test = value,
@@ -648,7 +641,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 }
                 WizardInput::Cancel => return Ok(None),
             },
-            14 => match prompt_string_default("Save profile name", Some(&profile.name))? {
+            14 => match prompt_string_default("Profile name", Some(&profile.name))? {
                 WizardInput::Value(value) => profile.name = value,
                 WizardInput::Back => {
                     step -= 1;
@@ -678,7 +671,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         println!("3. Save and run now");
         println!("4. Back");
         println!("5. Cancel");
-        match prompt_menu_default("Choose action [1-5]", "1", &["1", "2", "3", "4", "5"])? {
+        match prompt_menu_default("Action [1-5]", "1", &["1", "2", "3", "4", "5"])? {
             WizardInput::Value(value) if value == "1" => {
                 profile.save(&profile_path)?;
                 println!("Saved profile: {}", profile_path.display());
@@ -722,7 +715,7 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
         println!("{}. {}", index + 1, profile.display());
     }
     let choice = match prompt_usize_in_range(
-        &format!("Select profile number [0-{}]", profiles.len()),
+        &format!("Pick profile [0-{}]", profiles.len()),
         1,
         0,
         profiles.len(),
@@ -739,7 +732,7 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
     println!("1. Run");
     println!("2. Edit in wizard");
     println!("3. Back");
-    match prompt_menu_default("Choose action [1-3]", "2", &["1", "2", "3"])? {
+    match prompt_menu_default("Action [1-3]", "2", &["1", "2", "3"])? {
         WizardInput::Value(value) if value == "1" => {
             let _ = run_profile_session(paths, profile)?;
         }
@@ -756,17 +749,11 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
 }
 
 fn live_sampler_flow(paths: &AppPaths) -> Result<()> {
-    let duration =
-        match prompt_u64_in_range("Sampler duration seconds [recommended 60]", 60, 1, 86_400)? {
-            WizardInput::Value(value) => value,
-            WizardInput::Back | WizardInput::Cancel => return Ok(()),
-        };
-    let interval = match prompt_u64_in_range(
-        "Sample interval milliseconds [recommended 1000]",
-        1000,
-        100,
-        60_000,
-    )? {
+    let duration = match prompt_u64_in_range("Sampler seconds [rec 60]", 60, 1, 86_400)? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(()),
+    };
+    let interval = match prompt_u64_in_range("Sample ms [rec 1000]", 1000, 100, 60_000)? {
         WizardInput::Value(value) => value,
         WizardInput::Back | WizardInput::Cancel => return Ok(()),
     };
@@ -775,16 +762,14 @@ fn live_sampler_flow(paths: &AppPaths) -> Result<()> {
 }
 
 fn deep_trace_flow(paths: &AppPaths) -> Result<()> {
-    let duration =
-        match prompt_u64_in_range("Deep trace duration seconds [recommended 30]", 30, 1, 3_600)? {
-            WizardInput::Value(value) => value,
-            WizardInput::Back | WizardInput::Cancel => return Ok(()),
-        };
-    let fallback =
-        match prompt_bool_default("Fallback to sampler if deep trace unavailable?", true)? {
-            WizardInput::Value(value) => value,
-            WizardInput::Back | WizardInput::Cancel => return Ok(()),
-        };
+    let duration = match prompt_u64_in_range("Trace seconds [rec 30]", 30, 1, 3_600)? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(()),
+    };
+    let fallback = match prompt_bool_default("Fallback to sampler?", true)? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(()),
+    };
     let _ = run_diag_trace(paths, duration, fallback)?;
     Ok(())
 }
@@ -808,7 +793,7 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
         println!("{}. {}", index + 1, session);
     }
     let choice = match prompt_usize_in_range(
-        &format!("Select session number [0-{}]", sessions.len()),
+        &format!("Pick session [0-{}]", sessions.len()),
         1,
         0,
         sessions.len(),
@@ -825,7 +810,7 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
     println!("3. Export CSV");
     println!("4. Export HTML");
     println!("5. Back");
-    match prompt_menu_default("Choose action [1-5]", "1", &["1", "2", "3", "4", "5"])? {
+    match prompt_menu_default("Action [1-5]", "1", &["1", "2", "3", "4", "5"])? {
         WizardInput::Value(value) if value == "1" => {
             run_report(paths, session_id)?;
             pause()?;
@@ -1034,10 +1019,7 @@ fn choose_file_target_path() -> Result<WizardInput<String>> {
             println!("{}. {}{}", index + 1, option.display(), suffix);
         }
         println!("{}. Enter path manually", options.len() + 1);
-        match prompt_string_default(
-            &format!("Select file target [0-{}]", options.len() + 1),
-            Some("1"),
-        )? {
+        match prompt_string_default(&format!("Pick file [0-{}]", options.len() + 1), Some("1"))? {
             WizardInput::Value(value) => {
                 let Ok(choice) = value.parse::<usize>() else {
                     println!("Invalid choice");
@@ -1053,7 +1035,7 @@ fn choose_file_target_path() -> Result<WizardInput<String>> {
                 }
                 if choice == options.len() + 1 {
                     match prompt_string_default(
-                        "Enter file path",
+                        "File path",
                         Some(&options[0].display().to_string()),
                     )? {
                         WizardInput::Value(value) => return Ok(WizardInput::Value(value)),
@@ -1128,7 +1110,7 @@ fn choose_device_path(
                     continue;
                 }
                 if allow_manual && choice == manual_index {
-                    match prompt_string_default("Enter device path", None)? {
+                    match prompt_string_default("Device path", None)? {
                         WizardInput::Value(value) => return Ok(Some(PathBuf::from(value))),
                         WizardInput::Back => continue,
                         WizardInput::Cancel => return Ok(None),
