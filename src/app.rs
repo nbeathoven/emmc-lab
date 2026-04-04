@@ -73,7 +73,7 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
             WizardInput::Value(value) if value == "1" => {
                 if let Some(outcome) = wizard(paths, None)? {
                     if outcome.run_now {
-                        let _ = run_profile_session(paths, outcome.profile)?;
+                        run_profile_session_interactive(paths, outcome.profile)?;
                     }
                 }
             }
@@ -701,7 +701,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         println!("3. Save and run now");
         println!("4. Back");
         println!("5. Cancel");
-        match prompt_menu_default("Action [1-5]", "1", &["1", "2", "3", "4", "5"])? {
+        match prompt_menu_default("Action [1-5]", "4", &["1", "2", "3", "4", "5"])? {
             WizardInput::Value(value) if value == "1" => {
                 profile.save(&profile_path)?;
                 println!("Saved profile: {}", profile_path.display());
@@ -746,7 +746,7 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
     }
     let choice = match prompt_usize_in_range(
         &format!("Pick profile [0-{}]", profiles.len()),
-        1,
+        0,
         0,
         profiles.len(),
     )? {
@@ -762,14 +762,14 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
     println!("1. Run");
     println!("2. Edit in wizard");
     println!("3. Back");
-    match prompt_menu_default("Action [1-3]", "2", &["1", "2", "3"])? {
+    match prompt_menu_default("Action [1-3]", "3", &["1", "2", "3"])? {
         WizardInput::Value(value) if value == "1" => {
-            let _ = run_profile_session(paths, profile)?;
+            run_profile_session_interactive(paths, profile)?;
         }
         WizardInput::Value(value) if value == "2" => {
             if let Some(updated) = wizard(paths, Some(profile))? {
                 if updated.run_now {
-                    let _ = run_profile_session(paths, updated.profile)?;
+                    run_profile_session_interactive(paths, updated.profile)?;
                 }
             }
         }
@@ -782,7 +782,7 @@ fn live_sampler_flow(paths: &AppPaths) -> Result<()> {
     println!("1. Live monitor");
     println!("2. Timed capture");
     println!("3. Back");
-    match prompt_menu_default("Action [1-3]", "1", &["1", "2", "3"])? {
+    match prompt_menu_default("Action [1-3]", "3", &["1", "2", "3"])? {
         WizardInput::Value(value) if value == "1" => {
             let duration =
                 match prompt_u64_in_range("Monitor seconds [rec 0, 0=until q]", 0, 0, 86_400)? {
@@ -846,7 +846,7 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
     }
     let choice = match prompt_usize_in_range(
         &format!("Pick session [0-{}]", sessions.len()),
-        1,
+        0,
         0,
         sessions.len(),
     )? {
@@ -862,7 +862,7 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
     println!("3. Export CSV");
     println!("4. Export HTML");
     println!("5. Back");
-    match prompt_menu_default("Action [1-5]", "1", &["1", "2", "3", "4", "5"])? {
+    match prompt_menu_default("Action [1-5]", "5", &["1", "2", "3", "4", "5"])? {
         WizardInput::Value(value) if value == "1" => {
             run_report(paths, session_id)?;
             pause()?;
@@ -882,6 +882,23 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+fn run_profile_session_interactive(paths: &AppPaths, profile: Profile) -> Result<()> {
+    loop {
+        let session_id = run_profile_session(paths, profile.clone())?;
+        println!("1. Repeat same test");
+        println!("2. View this report");
+        println!("3. Back");
+        match prompt_menu_default("Action [1-3]", "3", &["1", "2", "3"])? {
+            WizardInput::Value(value) if value == "1" => continue,
+            WizardInput::Value(value) if value == "2" => {
+                run_report(paths, &session_id)?;
+                pause()?;
+            }
+            _ => return Ok(()),
+        }
+    }
 }
 
 fn settings_flow(paths: &AppPaths) -> Result<()> {
