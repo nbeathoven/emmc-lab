@@ -886,6 +886,276 @@ pub fn render_health_report(report: &HealthReport) -> String {
     out
 }
 
+pub fn render_live_monitor(
+    report: &crate::diagnostics::DiagnosticReport,
+    interval_ms: u64,
+) -> String {
+    let ui = Ui::detect();
+    let mut out = ui.banner("EMMC-LAB LIVE MONITOR");
+    let overview_rows = vec![
+        ("Updated".to_string(), report.ended_at.to_rfc3339()),
+        (
+            "Duration".to_string(),
+            format!("{} s", report.duration_seconds),
+        ),
+        ("Refresh".to_string(), format!("{} ms", interval_ms.max(1))),
+        (
+            "Observed".to_string(),
+            format!(
+                "{} proc, {} files, {} dirs, {} dev",
+                report.top_processes.len(),
+                report.top_files.len(),
+                report.top_directories.len(),
+                report.device_totals.len()
+            ),
+        ),
+        ("Controls".to_string(), "q quit".to_string()),
+    ];
+    let note_rows = vec![
+        (
+            "Bytes".to_string(),
+            "logical and storage bytes shown separately".to_string(),
+        ),
+        (
+            "Paths".to_string(),
+            format!("unresolved {}", report.unresolved_path_count),
+        ),
+        (
+            "Dropped".to_string(),
+            report.dropped_event_count.to_string(),
+        ),
+    ];
+    out.push_str(&ui.pair(
+        ui.kv_table("Monitor", &overview_rows),
+        ui.kv_table("Notes", &note_rows),
+    ));
+
+    let process_rows = report
+        .top_processes
+        .iter()
+        .take(row_limit(ui.width))
+        .map(|process| {
+            vec![
+                process.pid.to_string(),
+                process.command.clone(),
+                fmt_rate(process.logical_read_bytes_per_sec),
+                fmt_rate(process.logical_write_bytes_per_sec),
+                fmt_rate(process.storage_read_bytes_per_sec),
+                fmt_rate(process.storage_write_bytes_per_sec),
+                fmt_bytes(process.storage_read_bytes),
+                fmt_bytes(process.storage_write_bytes),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let process_panel = if process_rows.is_empty() {
+        String::new()
+    } else {
+        ui.table(
+            "Top Processes",
+            &[
+                Column {
+                    header: "PID",
+                    min: 5,
+                    max: 7,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Command",
+                    min: 10,
+                    max: 20,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Log R/s",
+                    min: 10,
+                    max: 12,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Log W/s",
+                    min: 10,
+                    max: 12,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Store R/s",
+                    min: 10,
+                    max: 12,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Store W/s",
+                    min: 10,
+                    max: 12,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Store R",
+                    min: 10,
+                    max: 11,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Store W",
+                    min: 10,
+                    max: 11,
+                    align: Align::Right,
+                },
+            ],
+            &process_rows,
+        )
+    };
+
+    let device_rows = report
+        .device_totals
+        .iter()
+        .take(row_limit(ui.width))
+        .map(|device| {
+            vec![
+                device.device.clone(),
+                device.reads_completed.to_string(),
+                device.writes_completed.to_string(),
+                device.current_ios_in_progress.to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let device_panel = if device_rows.is_empty() {
+        String::new()
+    } else {
+        ui.table(
+            "Devices",
+            &[
+                Column {
+                    header: "Device",
+                    min: 10,
+                    max: 14,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Reads",
+                    min: 7,
+                    max: 9,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Writes",
+                    min: 7,
+                    max: 9,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "InFlight",
+                    min: 8,
+                    max: 9,
+                    align: Align::Right,
+                },
+            ],
+            &device_rows,
+        )
+    };
+    if !process_panel.is_empty() || !device_panel.is_empty() {
+        out.push_str(&ui.pair(process_panel, device_panel));
+    }
+
+    let path_rows = report
+        .top_processes
+        .iter()
+        .take(row_limit(ui.width))
+        .map(|process| {
+            vec![
+                process.pid.to_string(),
+                process.exe_path.clone(),
+                process.cwd.clone(),
+                process.hottest_file.clone(),
+            ]
+        })
+        .collect::<Vec<_>>();
+    if !path_rows.is_empty() {
+        out.push_str(&ui.table(
+            "Process Paths",
+            &[
+                Column {
+                    header: "PID",
+                    min: 5,
+                    max: 7,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Executable",
+                    min: 14,
+                    max: 28,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "CWD",
+                    min: 14,
+                    max: 24,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Hottest File",
+                    min: 14,
+                    max: 28,
+                    align: Align::Left,
+                },
+            ],
+            &path_rows,
+        ));
+    }
+
+    let file_rows = report
+        .top_files
+        .iter()
+        .take(row_limit(ui.width))
+        .map(|file| {
+            vec![
+                file.file_path.clone(),
+                file.last_pid_touching_file.to_string(),
+                fmt_bytes(file.read_bytes),
+                fmt_bytes(file.write_bytes),
+            ]
+        })
+        .collect::<Vec<_>>();
+    if !file_rows.is_empty() {
+        out.push_str(&ui.table(
+            "Top Files",
+            &[
+                Column {
+                    header: "File",
+                    min: 16,
+                    max: 36,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "PID",
+                    min: 5,
+                    max: 7,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Read",
+                    min: 10,
+                    max: 11,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Write",
+                    min: 10,
+                    max: 11,
+                    align: Align::Right,
+                },
+            ],
+            &file_rows,
+        ));
+    }
+
+    out.push_str(&ui.note(
+        "Attribution:",
+        "best-effort procfs monitor; logical and storage bytes remain separate",
+    ));
+    out
+}
+
 pub fn render_doctor_report(report: &DoctorReport) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB DOCTOR");

@@ -49,6 +49,12 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum DiagCommand {
+    Monitor {
+        #[arg(long, default_value_t = 0)]
+        duration: u64,
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+    },
     Sample {
         #[arg(long, default_value_t = 60)]
         duration: u64,
@@ -85,6 +91,13 @@ pub fn run() -> Result<()> {
         }
         Some(Commands::Health { device }) => app::run_health(&paths, &device),
         Some(Commands::Diag { command }) => match command {
+            DiagCommand::Monitor {
+                duration,
+                interval_ms,
+            } => {
+                app::run_diag_monitor(duration, interval_ms)?;
+                Ok(())
+            }
             DiagCommand::Sample {
                 duration,
                 interval_ms,

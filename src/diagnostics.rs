@@ -26,11 +26,17 @@ pub struct ProcessSummary {
     pub command: String,
     pub exe_path: String,
     pub cwd: String,
+    pub logical_read_bytes: u64,
+    pub logical_write_bytes: u64,
+    pub storage_read_bytes: u64,
+    pub storage_write_bytes: u64,
     pub logical_read_bytes_per_sec: f64,
     pub logical_write_bytes_per_sec: f64,
     pub storage_read_bytes_per_sec: f64,
     pub storage_write_bytes_per_sec: f64,
     pub cancelled_write_bytes: u64,
+    pub read_syscalls: u64,
+    pub write_syscalls: u64,
     pub read_syscalls_per_sec: f64,
     pub write_syscalls_per_sec: f64,
     pub sync_count: u64,
@@ -129,12 +135,64 @@ struct ProcAgg {
     dir_hits: HashMap<String, u64>,
 }
 
+pub struct LiveSamplerState {
+    session_id: Option<String>,
+    started_at: DateTime<Utc>,
+    started: Instant,
+    prev: HashMap<i32, ProcIo>,
+    start_devices: HashMap<String, Vec<u64>>,
+    per_pid: HashMap<i32, ProcAgg>,
+    file_map: BTreeMap<String, FileSummary>,
+    unresolved_path_count: u64,
+}
+
 pub fn run_live_sampler(
     duration: Duration,
     interval: Duration,
     session_id: Option<String>,
 ) -> Result<DiagnosticReport> {
     run_live_sampler_internal(duration, interval, session_id, None)
+}
+
+impl LiveSamplerState {
+    pub fn new(session_id: Option<String>) -> Result<Self> {
+        Ok(Self {
+            session_id,
+            started_at: Utc::now(),
+            started: Instant::now(),
+            prev: snapshot_procfs()?,
+            start_devices: diskstats_map(),
+            per_pid: HashMap::new(),
+            file_map: BTreeMap::new(),
+            unresolved_path_count: 0,
+        })
+    }
+
+    pub fn tick(&mut self, interval: Duration) -> Result<DiagnosticReport> {
+        thread::sleep(interval);
+        self.sample_once()
+    }
+
+    pub fn sample_once(&mut self) -> Result<DiagnosticReport> {
+        let current = snapshot_procfs()?;
+        apply_proc_delta(
+            &self.prev,
+            &current,
+            &mut self.per_pid,
+            &mut self.file_map,
+            &mut self.unresolved_path_count,
+        );
+        self.prev = current;
+        Ok(build_sampler_report(
+            self.session_id.clone(),
+            self.started_at,
+            self.started,
+            &self.per_pid,
+            &self.file_map,
+            self.unresolved_path_count,
+            self.start_devices.clone(),
+        ))
+    }
 }
 
 pub fn run_live_sampler_until(
@@ -175,107 +233,128 @@ fn run_live_sampler_internal(
             ),
         });
     }
-    let start_ts = Utc::now();
-    let started = Instant::now();
-    let mut prev = snapshot_procfs()?;
-    let start_devices = diskstats_map();
-    let mut per_pid: HashMap<i32, ProcAgg> = HashMap::new();
-    let mut file_map: BTreeMap<String, FileSummary> = BTreeMap::new();
-    let mut unresolved_path_count = 0_u64;
+    let mut state = LiveSamplerState::new(session_id)?;
+    let mut last_report = build_sampler_report(
+        state.session_id.clone(),
+        state.started_at,
+        state.started,
+        &state.per_pid,
+        &state.file_map,
+        state.unresolved_path_count,
+        state.start_devices.clone(),
+    );
 
-    while started.elapsed() < duration
+    while state.started.elapsed() < duration
         && !stop_signal
             .as_ref()
             .map(|signal| signal.load(AtomicOrdering::Relaxed))
             .unwrap_or(false)
     {
-        thread::sleep(interval);
-        let current = snapshot_procfs()?;
-        for (pid, after) in &current {
-            let Some(before) = prev.get(pid) else {
-                continue;
-            };
-            let agg = per_pid.entry(*pid).or_insert_with(|| ProcAgg {
-                pid: *pid,
-                ppid: after.ppid,
-                uid: after.uid,
-                command: after.command.clone(),
-                exe_path: after.exe_path.clone(),
-                cwd: after.cwd.clone(),
-                ..ProcAgg::default()
-            });
-            agg.logical_read_bytes = agg
-                .logical_read_bytes
-                .saturating_add(after.rchar.saturating_sub(before.rchar));
-            agg.logical_write_bytes = agg
-                .logical_write_bytes
-                .saturating_add(after.wchar.saturating_sub(before.wchar));
-            agg.storage_read_bytes = agg
-                .storage_read_bytes
-                .saturating_add(after.read_bytes.saturating_sub(before.read_bytes));
-            agg.storage_write_bytes = agg
-                .storage_write_bytes
-                .saturating_add(after.write_bytes.saturating_sub(before.write_bytes));
-            agg.cancelled_write_bytes = agg.cancelled_write_bytes.saturating_add(
-                after
-                    .cancelled_write_bytes
-                    .saturating_sub(before.cancelled_write_bytes),
-            );
-            agg.read_syscalls = agg
-                .read_syscalls
-                .saturating_add(after.syscr.saturating_sub(before.syscr));
-            agg.write_syscalls = agg
-                .write_syscalls
-                .saturating_add(after.syscw.saturating_sub(before.syscw));
-            agg.open_file_count = after.open_files.len();
-            let mut unique_paths = HashSet::new();
-            for path in &after.open_files {
-                if unique_paths.insert(path.clone()) {
-                    *agg.file_hits.entry(path.clone()).or_default() += 1;
-                    if let Some(parent) = Path::new(path).parent() {
-                        *agg.dir_hits
-                            .entry(parent.display().to_string())
-                            .or_default() += 1;
-                    } else {
-                        unresolved_path_count = unresolved_path_count.saturating_add(1);
-                    }
-                }
-            }
+        last_report = state.tick(interval)?;
+    }
+    Ok(last_report)
+}
 
-            let share_count = unique_paths.len().max(1) as u64;
-            let read_share = after.read_bytes.saturating_sub(before.read_bytes) / share_count;
-            let write_share = after.write_bytes.saturating_sub(before.write_bytes) / share_count;
-            let read_ops_share = after.syscr.saturating_sub(before.syscr) / share_count;
-            let write_ops_share = after.syscw.saturating_sub(before.syscw) / share_count;
-            for path in unique_paths {
-                let entry = file_map.entry(path.clone()).or_insert_with(|| FileSummary {
-                    file_path: path.clone(),
-                    ..FileSummary::default()
-                });
-                entry.last_pid_touching_file = *pid;
-                entry.last_access_timestamp = Utc::now().to_rfc3339();
-                if read_share > 0 || read_ops_share > 0 {
-                    entry.readers_count += 1;
+fn apply_proc_delta(
+    prev: &HashMap<i32, ProcIo>,
+    current: &HashMap<i32, ProcIo>,
+    per_pid: &mut HashMap<i32, ProcAgg>,
+    file_map: &mut BTreeMap<String, FileSummary>,
+    unresolved_path_count: &mut u64,
+) {
+    for (pid, after) in current {
+        let Some(before) = prev.get(pid) else {
+            continue;
+        };
+        let agg = per_pid.entry(*pid).or_insert_with(|| ProcAgg {
+            pid: *pid,
+            ppid: after.ppid,
+            uid: after.uid,
+            command: after.command.clone(),
+            exe_path: after.exe_path.clone(),
+            cwd: after.cwd.clone(),
+            ..ProcAgg::default()
+        });
+        agg.logical_read_bytes = agg
+            .logical_read_bytes
+            .saturating_add(after.rchar.saturating_sub(before.rchar));
+        agg.logical_write_bytes = agg
+            .logical_write_bytes
+            .saturating_add(after.wchar.saturating_sub(before.wchar));
+        agg.storage_read_bytes = agg
+            .storage_read_bytes
+            .saturating_add(after.read_bytes.saturating_sub(before.read_bytes));
+        agg.storage_write_bytes = agg
+            .storage_write_bytes
+            .saturating_add(after.write_bytes.saturating_sub(before.write_bytes));
+        agg.cancelled_write_bytes = agg.cancelled_write_bytes.saturating_add(
+            after
+                .cancelled_write_bytes
+                .saturating_sub(before.cancelled_write_bytes),
+        );
+        agg.read_syscalls = agg
+            .read_syscalls
+            .saturating_add(after.syscr.saturating_sub(before.syscr));
+        agg.write_syscalls = agg
+            .write_syscalls
+            .saturating_add(after.syscw.saturating_sub(before.syscw));
+        agg.open_file_count = after.open_files.len();
+        let mut unique_paths = HashSet::new();
+        for path in &after.open_files {
+            if unique_paths.insert(path.clone()) {
+                *agg.file_hits.entry(path.clone()).or_default() += 1;
+                if let Some(parent) = Path::new(path).parent() {
+                    *agg.dir_hits
+                        .entry(parent.display().to_string())
+                        .or_default() += 1;
+                } else {
+                    *unresolved_path_count = unresolved_path_count.saturating_add(1);
                 }
-                if write_share > 0 || write_ops_share > 0 {
-                    entry.writers_count += 1;
-                }
-                entry.read_bytes = entry.read_bytes.saturating_add(read_share);
-                entry.write_bytes = entry.write_bytes.saturating_add(write_share);
-                entry.read_ops = entry.read_ops.saturating_add(read_ops_share);
-                entry.write_ops = entry.write_ops.saturating_add(write_ops_share);
             }
         }
-        prev = current;
-    }
 
+        let share_count = unique_paths.len().max(1) as u64;
+        let read_share = after.read_bytes.saturating_sub(before.read_bytes) / share_count;
+        let write_share = after.write_bytes.saturating_sub(before.write_bytes) / share_count;
+        let read_ops_share = after.syscr.saturating_sub(before.syscr) / share_count;
+        let write_ops_share = after.syscw.saturating_sub(before.syscw) / share_count;
+        for path in unique_paths {
+            let entry = file_map.entry(path.clone()).or_insert_with(|| FileSummary {
+                file_path: path.clone(),
+                ..FileSummary::default()
+            });
+            entry.last_pid_touching_file = *pid;
+            entry.last_access_timestamp = Utc::now().to_rfc3339();
+            if read_share > 0 || read_ops_share > 0 {
+                entry.readers_count += 1;
+            }
+            if write_share > 0 || write_ops_share > 0 {
+                entry.writers_count += 1;
+            }
+            entry.read_bytes = entry.read_bytes.saturating_add(read_share);
+            entry.write_bytes = entry.write_bytes.saturating_add(write_share);
+            entry.read_ops = entry.read_ops.saturating_add(read_ops_share);
+            entry.write_ops = entry.write_ops.saturating_add(write_ops_share);
+        }
+    }
+}
+
+fn build_sampler_report(
+    session_id: Option<String>,
+    started_at: DateTime<Utc>,
+    started: Instant,
+    per_pid: &HashMap<i32, ProcAgg>,
+    file_map: &BTreeMap<String, FileSummary>,
+    unresolved_path_count: u64,
+    start_devices: HashMap<String, Vec<u64>>,
+) -> DiagnosticReport {
     let elapsed_secs = started.elapsed().as_secs().max(1);
     let total_observed_storage = per_pid
         .values()
         .map(|p| p.storage_read_bytes + p.storage_write_bytes)
         .sum::<u64>() as f64;
     let mut processes = per_pid
-        .into_values()
+        .values()
         .map(|agg| {
             let hottest_file = agg
                 .file_hits
@@ -294,14 +373,20 @@ fn run_live_sampler_internal(
                 pid: agg.pid,
                 ppid: agg.ppid,
                 user: resolve_uid_to_user(agg.uid),
-                command: agg.command,
-                exe_path: agg.exe_path,
-                cwd: agg.cwd,
+                command: agg.command.clone(),
+                exe_path: agg.exe_path.clone(),
+                cwd: agg.cwd.clone(),
+                logical_read_bytes: agg.logical_read_bytes,
+                logical_write_bytes: agg.logical_write_bytes,
+                storage_read_bytes: agg.storage_read_bytes,
+                storage_write_bytes: agg.storage_write_bytes,
                 logical_read_bytes_per_sec: agg.logical_read_bytes as f64 / elapsed_secs as f64,
                 logical_write_bytes_per_sec: agg.logical_write_bytes as f64 / elapsed_secs as f64,
                 storage_read_bytes_per_sec: agg.storage_read_bytes as f64 / elapsed_secs as f64,
                 storage_write_bytes_per_sec: agg.storage_write_bytes as f64 / elapsed_secs as f64,
                 cancelled_write_bytes: agg.cancelled_write_bytes,
+                read_syscalls: agg.read_syscalls,
+                write_syscalls: agg.write_syscalls,
                 read_syscalls_per_sec: agg.read_syscalls as f64 / elapsed_secs as f64,
                 write_syscalls_per_sec: agg.write_syscalls as f64 / elapsed_secs as f64,
                 sync_count: 0,
@@ -319,7 +404,7 @@ fn run_live_sampler_internal(
     processes.sort_by(sort_processes);
     processes.truncate(25);
 
-    let mut files = file_map.into_values().collect::<Vec<_>>();
+    let mut files = file_map.values().cloned().collect::<Vec<_>>();
     files.sort_by(|a, b| {
         (b.read_bytes + b.write_bytes)
             .cmp(&(a.read_bytes + a.write_bytes))
@@ -337,10 +422,10 @@ fn run_live_sampler_internal(
 
     let devices = summarize_devices(start_devices, diskstats_map());
 
-    Ok(DiagnosticReport {
+    DiagnosticReport {
         mode: DiagnosticMode::Sample,
         session_id,
-        started_at: start_ts,
+        started_at,
         ended_at: Utc::now(),
         duration_seconds: elapsed_secs,
         top_processes: processes,
@@ -351,7 +436,7 @@ fn run_live_sampler_internal(
         dropped_event_count: 0,
         attribution_note: "Logical syscall bytes (rchar/wchar) and storage-layer bytes (read_bytes/write_bytes) are reported separately. File and directory attribution in sampler mode is best-effort based on observed open descriptors and procfs deltas; it is not exact per-file kernel attribution.".to_string(),
         fallback_message: None,
-    })
+    }
 }
 
 pub fn run_deep_trace(

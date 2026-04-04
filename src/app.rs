@@ -1,5 +1,5 @@
 use crate::diagnostics::{
-    run_deep_trace, run_live_sampler, run_live_sampler_until, DiagnosticReport,
+    run_deep_trace, run_live_sampler, run_live_sampler_until, DiagnosticReport, LiveSamplerState,
 };
 use crate::engine::execute_profile;
 use crate::health::{collect_health, read_emmc_health};
@@ -12,13 +12,17 @@ use crate::system::{
     assess_raw_target_safety, block_device_size, collect_capabilities, collect_system_snapshot,
     doctor, list_devices, logical_block_size, AppPaths, DeviceInfo,
 };
-use crate::ui::{render_device_list, render_doctor_report, render_health_report, render_settings};
+use crate::ui::{
+    render_device_list, render_doctor_report, render_health_report, render_live_monitor,
+    render_settings,
+};
 use anyhow::{bail, Result};
 use chrono::Utc;
 use std::env;
 use std::ffi::CString;
 use std::fs;
 use std::io::{self, Write};
+use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -54,7 +58,7 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
         println!("emmc-lab");
         println!("1. New Test Run");
         println!("2. Run Saved Profile");
-        println!("3. Diagnostic Mode - Live Sampler");
+        println!("3. Diagnostic Mode - Live Monitor");
         println!("4. Diagnostic Mode - Deep Trace");
         println!("5. Device Health / eMMC Health");
         println!("6. Reports / Export");
@@ -196,6 +200,40 @@ pub fn run_diag_sample(
     println!("Saved session: {}", path.display());
     println!("{}", terminal_summary(&record));
     Ok(session_id)
+}
+
+pub fn run_diag_monitor(duration_seconds: u64, interval_ms: u64) -> Result<()> {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1
+        || unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1
+    {
+        bail!("live monitor requires an interactive terminal; use `emmc-lab diag sample` for a saved capture");
+    }
+    let interval = Duration::from_millis(interval_ms.max(250));
+    let _terminal = RawTerminalGuard::new()?;
+    let mut sampler = LiveSamplerState::new(None)?;
+    print!("\u{1b}[2J\u{1b}[H");
+    io::stdout().flush()?;
+    println!("Starting live monitor. Press q to quit.");
+    io::stdout().flush()?;
+    loop {
+        if let Some(key) = poll_keypress_until(interval)? {
+            if matches!(key, b'q' | b'Q' | 3) {
+                break;
+            }
+        }
+        let report = sampler.sample_once()?;
+        print!(
+            "\u{1b}[2J\u{1b}[H{}",
+            render_live_monitor(&report, interval_ms)
+        );
+        io::stdout().flush()?;
+        if duration_seconds > 0 && report.duration_seconds >= duration_seconds {
+            break;
+        }
+    }
+    print!("\u{1b}[2J\u{1b}[H");
+    io::stdout().flush()?;
+    Ok(())
 }
 
 pub fn run_diag_trace(
@@ -749,16 +787,38 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
 }
 
 fn live_sampler_flow(paths: &AppPaths) -> Result<()> {
-    let duration = match prompt_u64_in_range("Sampler seconds [rec 60]", 60, 1, 86_400)? {
-        WizardInput::Value(value) => value,
-        WizardInput::Back | WizardInput::Cancel => return Ok(()),
-    };
-    let interval = match prompt_u64_in_range("Sample ms [rec 1000]", 1000, 100, 60_000)? {
-        WizardInput::Value(value) => value,
-        WizardInput::Back | WizardInput::Cancel => return Ok(()),
-    };
-    let _ = run_diag_sample(paths, duration, interval)?;
-    Ok(())
+    println!("1. Live monitor");
+    println!("2. Timed capture");
+    println!("3. Back");
+    match prompt_menu_default("Action [1-3]", "1", &["1", "2", "3"])? {
+        WizardInput::Value(value) if value == "1" => {
+            let duration =
+                match prompt_u64_in_range("Monitor seconds [rec 0, 0=until q]", 0, 0, 86_400)? {
+                    WizardInput::Value(value) => value,
+                    WizardInput::Back | WizardInput::Cancel => return Ok(()),
+                };
+            let interval = match prompt_u64_in_range("Refresh ms [rec 1000]", 1000, 250, 60_000)? {
+                WizardInput::Value(value) => value,
+                WizardInput::Back | WizardInput::Cancel => return Ok(()),
+            };
+            run_diag_monitor(duration, interval)?;
+            pause()?;
+            Ok(())
+        }
+        WizardInput::Value(value) if value == "2" => {
+            let duration = match prompt_u64_in_range("Sampler seconds [rec 60]", 60, 1, 86_400)? {
+                WizardInput::Value(value) => value,
+                WizardInput::Back | WizardInput::Cancel => return Ok(()),
+            };
+            let interval = match prompt_u64_in_range("Sample ms [rec 1000]", 1000, 100, 60_000)? {
+                WizardInput::Value(value) => value,
+                WizardInput::Back | WizardInput::Cancel => return Ok(()),
+            };
+            let _ = run_diag_sample(paths, duration, interval)?;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn deep_trace_flow(paths: &AppPaths) -> Result<()> {
@@ -848,6 +908,7 @@ fn print_help(paths: &AppPaths) {
     );
     println!("Exact 1,000,000 write run in selected logical sector range:");
     println!("  emmc-lab run --profile /path/to/million-writes.yaml --i-understand-this-will-destroy-data");
+    println!("Live monitor: emmc-lab diag monitor --interval-ms 1000");
     println!("Live sampler for 60 seconds: emmc-lab diag sample --duration 60");
     println!("Deep trace for 30 seconds: emmc-lab diag trace --duration 30");
     println!("Run test + diagnostics together: configure diagnostic capture = on in the wizard or YAML profile");
@@ -1522,6 +1583,71 @@ fn pause() -> Result<()> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(())
+}
+
+struct RawTerminalGuard {
+    original: libc::termios,
+    active: bool,
+}
+
+impl RawTerminalGuard {
+    fn new() -> Result<Self> {
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+            return Ok(Self {
+                original: unsafe { std::mem::zeroed() },
+                active: false,
+            });
+        }
+        let mut original = MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, original.as_mut_ptr()) } != 0 {
+            bail!("failed to read terminal mode");
+        }
+        let original = unsafe { original.assume_init() };
+        let mut raw = original;
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        raw.c_cc[libc::VMIN] = 0;
+        raw.c_cc[libc::VTIME] = 0;
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) } != 0 {
+            bail!("failed to set terminal raw mode");
+        }
+        Ok(Self {
+            original,
+            active: true,
+        })
+    }
+}
+
+impl Drop for RawTerminalGuard {
+    fn drop(&mut self) {
+        if self.active {
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+            }
+        }
+    }
+}
+
+fn poll_keypress_until(timeout: Duration) -> Result<Option<u8>> {
+    let timeout_ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+    let mut pollfd = libc::pollfd {
+        fd: libc::STDIN_FILENO,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let rc = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
+    if rc < 0 {
+        bail!("failed to poll stdin");
+    }
+    if rc == 0 || pollfd.revents & libc::POLLIN == 0 {
+        return Ok(None);
+    }
+    let mut byte = [0_u8; 1];
+    let read = unsafe { libc::read(libc::STDIN_FILENO, byte.as_mut_ptr().cast(), 1) };
+    if read == 1 {
+        Ok(Some(byte[0]))
+    } else {
+        Ok(None)
+    }
 }
 
 #[cfg(test)]
