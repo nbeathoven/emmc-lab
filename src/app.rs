@@ -211,10 +211,8 @@ pub fn run_diag_monitor(duration_seconds: u64, interval_ms: u64) -> Result<()> {
     let interval = Duration::from_millis(interval_ms.max(250));
     let _terminal = RawTerminalGuard::new()?;
     let mut sampler = LiveSamplerState::new(None)?;
-    print!("\u{1b}[2J\u{1b}[H");
-    io::stdout().flush()?;
-    println!("Starting live monitor. Press q to quit.");
-    io::stdout().flush()?;
+    let first_report = sampler.sample_once()?;
+    redraw_live_monitor(&first_report, interval_ms)?;
     loop {
         if let Some(key) = poll_keypress_until(interval)? {
             if matches!(key, b'q' | b'Q' | 3) {
@@ -222,17 +220,11 @@ pub fn run_diag_monitor(duration_seconds: u64, interval_ms: u64) -> Result<()> {
             }
         }
         let report = sampler.sample_once()?;
-        print!(
-            "\u{1b}[2J\u{1b}[H{}",
-            render_live_monitor(&report, interval_ms)
-        );
-        io::stdout().flush()?;
+        redraw_live_monitor(&report, interval_ms)?;
         if duration_seconds > 0 && report.duration_seconds >= duration_seconds {
             break;
         }
     }
-    print!("\u{1b}[2J\u{1b}[H");
-    io::stdout().flush()?;
     Ok(())
 }
 
@@ -1610,6 +1602,8 @@ impl RawTerminalGuard {
         if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) } != 0 {
             bail!("failed to set terminal raw mode");
         }
+        print!("\u{1b}[?1049h\u{1b}[?25l\u{1b}[H\u{1b}[J");
+        io::stdout().flush()?;
         Ok(Self {
             original,
             active: true,
@@ -1620,11 +1614,23 @@ impl RawTerminalGuard {
 impl Drop for RawTerminalGuard {
     fn drop(&mut self) {
         if self.active {
+            let _ = write!(io::stdout(), "\u{1b}[?25h\u{1b}[?1049l");
+            let _ = io::stdout().flush();
             unsafe {
                 libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
             }
         }
     }
+}
+
+fn redraw_live_monitor(report: &DiagnosticReport, interval_ms: u64) -> Result<()> {
+    write!(
+        io::stdout(),
+        "\u{1b}[H\u{1b}[J{}",
+        render_live_monitor(report, interval_ms)
+    )?;
+    io::stdout().flush()?;
+    Ok(())
 }
 
 fn poll_keypress_until(timeout: Duration) -> Result<Option<u8>> {
