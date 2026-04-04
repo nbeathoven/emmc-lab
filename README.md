@@ -1,15 +1,211 @@
 # emmc-lab
 
-See [docs/README.md](docs/README.md) for build, install, usage, safety, and limitation details.
+`emmc-lab` is a single-binary Rust CLI for Raspberry Pi OS / Debian Bookworm that combines:
 
-Raspberry Pi installer:
+- eMMC and file-backed workload testing
+- exact operation-count random and sequential I/O runs
+- live procfs-based I/O diagnostics
+- eMMC health snapshots through `mmc-utils` when available
+- JSON, CSV, and HTML reporting
+- an SSH-friendly interactive menu plus direct automation commands
+
+Current release: `v0.2.0`
+
+## What It Does
+
+`emmc-lab` has two primary jobs:
+
+1. Stress and characterize eMMC or file-backed storage with reproducible workloads.
+2. Show which processes, files, directories, and devices are using I/O on the system.
+
+It is designed as one application, not a loose bundle of scripts. The default command opens a plain numbered CLI menu that works over SSH without a full-screen TUI.
+
+## How It Works
+
+At a high level, a run goes through these stages:
+
+1. Load a YAML profile or collect answers through the interactive wizard.
+2. Validate the workload, addressing range, stop condition, and safety requirements.
+3. Refuse destructive raw-device writes unless the target is a block device, not mounted, not the active root device, and explicitly confirmed.
+4. Execute the workload through a native Rust engine using explicit-offset `pread` and `pwrite`.
+5. Record exact completed read and write counts, byte counts, interval samples, latency percentiles, and error counters.
+6. Optionally collect health snapshots before and after the run.
+7. Optionally collect live diagnostic sampler data during the run to flag outside I/O interference.
+8. Persist session results and export terminal, JSON, CSV, and HTML summaries.
+
+Diagnostic mode works in two levels:
+
+- `diag sample`: lightweight procfs/sysfs sampling of per-process and device activity
+- `diag trace`: best-effort deep-trace entry point that explains unavailable tracing support and can fall back to sampler mode
+
+## Main Features
+
+- interactive main menu with wizard-based test creation
+- direct commands for automation
+- YAML saved profiles
+- exact `op_count` stopping
+- logical sector range targeting and byte-range targeting
+- separate logical syscall bytes and storage-layer bytes in diagnostics
+- health snapshots with graceful fallback when `mmc-utils` is missing
+- lightweight persistence without an external database
+- optional embedded SQLite feature flag
+- Raspberry Pi self-deploy installer
+
+## Important Limitation
+
+Logical range targeting is LBA-based only.
+
+`emmc-lab` can target exact logical sector ranges and exact operation counts such as `1,000,000` random writes in a selected logical range, but it does **not** claim fixed physical NAND cell targeting. Reports and docs repeat this explicitly.
+
+## Safety
+
+Raw-device writing is destructive.
+
+`emmc-lab` refuses destructive raw-device runs unless all of these are true:
+
+1. the target is a block device
+2. the target is not mounted
+3. the target is not the active root device
+4. the requested range fits the device
+5. the user passes `--i-understand-this-will-destroy-data`
+
+## Quick Start
+
+Open the interactive menu:
+
+```bash
+emmc-lab
+```
+
+Run the wizard directly:
+
+```bash
+emmc-lab wizard
+```
+
+Run a saved profile:
+
+```bash
+emmc-lab run --profile examples/file-randread.yaml
+```
+
+Run live diagnostics for 60 seconds:
+
+```bash
+emmc-lab diag sample --duration 60 --interval-ms 1000
+```
+
+Check device health:
+
+```bash
+emmc-lab health --device /dev/mmcblk0
+```
+
+## Raspberry Pi Install
+
+Local install from a checkout:
 
 ```bash
 ./rpi/install.sh
 ```
 
-After the repository is on GitHub, the self-deploy one-liner is:
+GitHub self-deploy install:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nbeathoven/emmc-lab/main/rpi/install.sh | bash
 ```
+
+The installer:
+
+- checks required Debian packages and skips installed ones
+- installs missing required packages
+- installs optional `mmc-utils` and `fio` by default
+- installs Rust if `cargo` is missing
+- clones or updates the repo if needed
+- builds `emmc-lab` in release mode
+- installs the binary into `/usr/local/bin`
+- prints the final prompt needed to launch the app
+
+After install, run:
+
+```bash
+emmc-lab
+```
+
+## Build
+
+Requirements:
+
+- Linux on Raspberry Pi OS / Debian Bookworm
+- Rust toolchain (`cargo`, `rustc`) unless using the installer
+
+Build manually:
+
+```bash
+cargo build --release
+sudo install -m 0755 target/release/emmc-lab /usr/local/bin/emmc-lab
+```
+
+Optional embedded SQLite build:
+
+```bash
+cargo build --release --features sqlite
+```
+
+## Project Layout
+
+- `src/`: application source
+- `examples/`: example YAML profiles
+- `rpi/`: Raspberry Pi install scripts and notes
+- `sample_reports/`: sample report artifacts
+- `tests/`: integration coverage
+- `docs/README.md`: detailed usage and operational notes
+
+## Reporting and Storage
+
+Each session is stored without an external database server.
+
+Default outputs include:
+
+- `session.json`
+- `intervals.jsonl`
+- optional JSON export
+- optional CSV export
+- optional HTML export
+
+Reports include:
+
+- session metadata
+- target and workload configuration
+- exact operation count or runtime
+- logical range details
+- performance and latency summaries
+- errors and verification results
+- health before and after when available
+- notes on logical-vs-physical limitations
+- interference notes when diagnostics are captured during testing
+
+## Dependencies and Fallbacks
+
+Mandatory runtime inputs:
+
+- Linux procfs and sysfs
+- writable output directories
+
+Optional runtime tools:
+
+- `mmc-utils` for EXT_CSD health
+- kernel tracing or eBPF support for deep tracing
+- `fio` for optional comparison workflows
+
+If an optional feature is unavailable, `emmc-lab` reports that clearly and falls back or disables that capability instead of failing silently.
+
+## Versioning and Releases
+
+- Crate version: `0.2.0`
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
+- GitHub releases: [Releases](https://github.com/nbeathoven/emmc-lab/releases)
+
+## More Documentation
+
+Detailed command usage, safety notes, and report behavior are in [docs/README.md](docs/README.md).

@@ -1,6 +1,6 @@
 [package]
 name = "emmc-lab"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Single-binary Linux CLI for eMMC workload testing, diagnostics, health, and reporting."
