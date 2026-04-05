@@ -451,6 +451,14 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 "Dropped Events".to_string(),
                 diag.dropped_event_count.to_string(),
             ),
+            (
+                "Restricted".to_string(),
+                diag.restricted_process_count.to_string(),
+            ),
+            (
+                "Kernel-like".to_string(),
+                diag.kernel_process_count.to_string(),
+            ),
         ];
         out.push_str(&ui.pair(session_panel, ui.kv_table("Diagnostics", &diag_rows)));
     } else {
@@ -487,6 +495,14 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 (
                     "Dropped Events".to_string(),
                     diag.dropped_event_count.to_string(),
+                ),
+                (
+                    "Restricted".to_string(),
+                    diag.restricted_process_count.to_string(),
+                ),
+                (
+                    "Kernel-like".to_string(),
+                    diag.kernel_process_count.to_string(),
                 ),
             ];
             out.push_str(&ui.kv_table("Diagnostics", &diag_rows));
@@ -942,6 +958,14 @@ pub fn render_live_monitor(
             "Dropped".to_string(),
             report.dropped_event_count.to_string(),
         ),
+        (
+            "Restricted".to_string(),
+            report.restricted_process_count.to_string(),
+        ),
+        (
+            "Kernel".to_string(),
+            report.kernel_process_count.to_string(),
+        ),
     ];
     out.push_str(&ui.pair(
         ui.kv_table("Monitor", &overview_rows),
@@ -1027,6 +1051,15 @@ pub fn render_live_monitor(
 
     if compact {
         out.push_str(&process_panel);
+        if report.restricted_process_count > 0 || report.kernel_process_count > 0 {
+            out.push_str(&ui.note(
+                "Access:",
+                &format!(
+                    "{} restricted, {} kernel-like; run with sudo for fuller attribution",
+                    report.restricted_process_count, report.kernel_process_count
+                ),
+            ));
+        }
         out.push_str(&ui.note(
             "Compact:",
             "lower sections hidden on short screens; use a taller terminal or timed capture for full detail",
@@ -1085,8 +1118,59 @@ pub fn render_live_monitor(
             &device_rows,
         )
     };
+    let restricted_limit = if medium { 4 } else { 8 };
+    let restricted_rows = report
+        .restricted_processes
+        .iter()
+        .take(restricted_limit)
+        .map(|process| {
+            vec![
+                process.pid.to_string(),
+                process.user.clone(),
+                process.command.clone(),
+                process.reason.replace('_', " "),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let restricted_panel = if restricted_rows.is_empty() {
+        String::new()
+    } else {
+        ui.table(
+            "Restricted / Kernel Activity",
+            &[
+                Column {
+                    header: "PID",
+                    min: 5,
+                    max: 7,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "User",
+                    min: 6,
+                    max: 10,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Command",
+                    min: 12,
+                    max: 24,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Reason",
+                    min: 10,
+                    max: 22,
+                    align: Align::Left,
+                },
+            ],
+            &restricted_rows,
+        )
+    };
     if !process_panel.is_empty() || !device_panel.is_empty() {
         out.push_str(&ui.pair(process_panel, device_panel));
+    }
+    if !restricted_panel.is_empty() {
+        out.push_str(&restricted_panel);
     }
 
     if !medium {
@@ -1187,7 +1271,7 @@ pub fn render_live_monitor(
 
     out.push_str(&ui.note(
         "Attribution:",
-        "best-effort procfs monitor; logical and storage bytes remain separate",
+        "best-effort procfs monitor; logical and storage bytes remain separate; run with sudo for fuller process attribution",
     ));
     out
 }

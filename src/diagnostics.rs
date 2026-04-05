@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
@@ -81,6 +82,15 @@ pub struct DeviceSummary {
     pub current_ios_in_progress: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RestrictedProcessSummary {
+    pub pid: i32,
+    pub ppid: i32,
+    pub user: String,
+    pub command: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticReport {
     pub mode: DiagnosticMode,
@@ -92,6 +102,9 @@ pub struct DiagnosticReport {
     pub top_files: Vec<FileSummary>,
     pub top_directories: Vec<DirectorySummary>,
     pub device_totals: Vec<DeviceSummary>,
+    pub restricted_process_count: u64,
+    pub kernel_process_count: u64,
+    pub restricted_processes: Vec<RestrictedProcessSummary>,
     pub unresolved_path_count: u64,
     pub dropped_event_count: u64,
     pub attribution_note: String,
@@ -135,6 +148,20 @@ struct ProcAgg {
     dir_hits: HashMap<String, u64>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ProcIdentity {
+    pid: i32,
+    ppid: i32,
+    uid: u32,
+    command: String,
+}
+
+#[derive(Default)]
+struct ProcSnapshot {
+    accessible: HashMap<i32, ProcIo>,
+    restricted: Vec<RestrictedProcessSummary>,
+}
+
 pub struct LiveSamplerState {
     session_id: Option<String>,
     started_at: DateTime<Utc>,
@@ -143,6 +170,7 @@ pub struct LiveSamplerState {
     start_devices: HashMap<String, Vec<u64>>,
     per_pid: HashMap<i32, ProcAgg>,
     file_map: BTreeMap<String, FileSummary>,
+    restricted_processes: HashMap<i32, RestrictedProcessSummary>,
     unresolved_path_count: u64,
 }
 
@@ -160,10 +188,11 @@ impl LiveSamplerState {
             session_id,
             started_at: Utc::now(),
             started: Instant::now(),
-            prev: snapshot_procfs()?,
+            prev: snapshot_procfs()?.accessible,
             start_devices: diskstats_map(),
             per_pid: HashMap::new(),
             file_map: BTreeMap::new(),
+            restricted_processes: HashMap::new(),
             unresolved_path_count: 0,
         })
     }
@@ -177,18 +206,22 @@ impl LiveSamplerState {
         let current = snapshot_procfs()?;
         apply_proc_delta(
             &self.prev,
-            &current,
+            &current.accessible,
             &mut self.per_pid,
             &mut self.file_map,
             &mut self.unresolved_path_count,
         );
-        self.prev = current;
+        for process in current.restricted {
+            self.restricted_processes.insert(process.pid, process);
+        }
+        self.prev = current.accessible;
         Ok(build_sampler_report(
             self.session_id.clone(),
             self.started_at,
             self.started,
             &self.per_pid,
             &self.file_map,
+            &self.restricted_processes,
             self.unresolved_path_count,
             self.start_devices.clone(),
         ))
@@ -225,6 +258,9 @@ fn run_live_sampler_internal(
             top_files: vec![],
             top_directories: vec![],
             device_totals: vec![],
+            restricted_process_count: 0,
+            kernel_process_count: 0,
+            restricted_processes: vec![],
             unresolved_path_count: 0,
             dropped_event_count: 0,
             attribution_note: "procfs is unavailable on this host, so live sampler attribution could not be collected.".to_string(),
@@ -240,6 +276,7 @@ fn run_live_sampler_internal(
         state.started,
         &state.per_pid,
         &state.file_map,
+        &state.restricted_processes,
         state.unresolved_path_count,
         state.start_devices.clone(),
     );
@@ -339,12 +376,43 @@ fn apply_proc_delta(
     }
 }
 
+fn snapshot_procfs() -> Result<ProcSnapshot> {
+    let mut snapshot = ProcSnapshot::default();
+    for entry in fs::read_dir("/proc").context("read /proc")? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Ok(pid) = file_name.to_string_lossy().parse::<i32>() else {
+            continue;
+        };
+        match read_pid_snapshot(pid) {
+            Ok(proc_io) => {
+                snapshot.accessible.insert(pid, proc_io);
+            }
+            Err(err) => {
+                if is_permission_error(&err) {
+                    if let Some(identity) = read_pid_identity(pid) {
+                        snapshot.restricted.push(RestrictedProcessSummary {
+                            pid: identity.pid,
+                            ppid: identity.ppid,
+                            user: resolve_uid_to_user(identity.uid),
+                            command: identity.command,
+                            reason: "proc_io_permission_denied".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(snapshot)
+}
+
 fn build_sampler_report(
     session_id: Option<String>,
     started_at: DateTime<Utc>,
     started: Instant,
     per_pid: &HashMap<i32, ProcAgg>,
     file_map: &BTreeMap<String, FileSummary>,
+    restricted_processes: &HashMap<i32, RestrictedProcessSummary>,
     unresolved_path_count: u64,
     start_devices: HashMap<String, Vec<u64>>,
 ) -> DiagnosticReport {
@@ -421,6 +489,13 @@ fn build_sampler_report(
     directories.truncate(25);
 
     let devices = summarize_devices(start_devices, diskstats_map());
+    let mut restricted = restricted_processes.values().cloned().collect::<Vec<_>>();
+    restricted.sort_by(|a, b| a.command.cmp(&b.command).then_with(|| a.pid.cmp(&b.pid)));
+    let kernel_process_count = restricted
+        .iter()
+        .filter(|process| is_kernel_like_command(&process.command))
+        .count() as u64;
+    restricted.truncate(16);
 
     DiagnosticReport {
         mode: DiagnosticMode::Sample,
@@ -432,9 +507,12 @@ fn build_sampler_report(
         top_files: files,
         top_directories: directories,
         device_totals: devices,
+        restricted_process_count: restricted_processes.len() as u64,
+        kernel_process_count,
+        restricted_processes: restricted,
         unresolved_path_count,
         dropped_event_count: 0,
-        attribution_note: "Logical syscall bytes (rchar/wchar) and storage-layer bytes (read_bytes/write_bytes) are reported separately. File and directory attribution in sampler mode is best-effort based on observed open descriptors and procfs deltas; it is not exact per-file kernel attribution.".to_string(),
+        attribution_note: "Logical syscall bytes (rchar/wchar) and storage-layer bytes (read_bytes/write_bytes) are reported separately. File and directory attribution in sampler mode is best-effort based on observed open descriptors and procfs deltas; it is not exact per-file kernel attribution. Processes owned by other users may require root to read /proc/<pid>/io, and kernel writeback activity may remain unattributed at the process layer.".to_string(),
         fallback_message: None,
     }
 }
@@ -464,6 +542,9 @@ pub fn run_deep_trace(
             top_files: vec![],
             top_directories: vec![],
             device_totals: vec![],
+            restricted_process_count: 0,
+            kernel_process_count: 0,
+            restricted_processes: vec![],
             unresolved_path_count: 0,
             dropped_event_count: 0,
             attribution_note: "deep trace requires root and kernel tracing support; when unavailable, the application can fall back to sampler mode".to_string(),
@@ -480,21 +561,6 @@ pub fn run_deep_trace(
     );
     report.attribution_note = "This report is a best-effort fallback, not a kernel event trace. Requested/completed bytes, errno attribution, and syscall latency require the optional deep tracer backend.".to_string();
     Ok(report)
-}
-
-fn snapshot_procfs() -> Result<HashMap<i32, ProcIo>> {
-    let mut map = HashMap::new();
-    for entry in fs::read_dir("/proc").context("read /proc")? {
-        let entry = entry?;
-        let file_name = entry.file_name();
-        let Ok(pid) = file_name.to_string_lossy().parse::<i32>() else {
-            continue;
-        };
-        if let Ok(snapshot) = read_pid_snapshot(pid) {
-            map.insert(pid, snapshot);
-        }
-    }
-    Ok(map)
 }
 
 fn read_pid_snapshot(pid: i32) -> Result<ProcIo> {
@@ -540,6 +606,58 @@ fn read_pid_snapshot(pid: i32) -> Result<ProcIo> {
         }
     }
     Ok(snapshot)
+}
+
+fn read_pid_identity(pid: i32) -> Option<ProcIdentity> {
+    let status_text = fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
+    let mut identity = ProcIdentity {
+        pid,
+        command: read_cmdline(pid).unwrap_or_default(),
+        ..ProcIdentity::default()
+    };
+    for line in status_text.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            identity.uid = rest
+                .split_whitespace()
+                .find_map(|value| value.parse::<u32>().ok())
+                .unwrap_or(0);
+        }
+        if let Some(rest) = line.strip_prefix("PPid:") {
+            identity.ppid = rest.trim().parse::<i32>().unwrap_or(0);
+        }
+        if let Some(rest) = line.strip_prefix("Name:") {
+            if identity.command.is_empty() {
+                identity.command = rest.trim().to_string();
+            }
+        }
+    }
+    if identity.command.is_empty() {
+        identity.command = pid.to_string();
+    }
+    Some(identity)
+}
+
+fn is_permission_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<io::Error>()
+            .map(|io_err| io_err.kind() == io::ErrorKind::PermissionDenied)
+            .unwrap_or(false)
+    }) || err.to_string().contains("Permission denied")
+}
+
+fn is_kernel_like_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        return true;
+    }
+    matches!(
+        trimmed,
+        "kthreadd" | "ksoftirqd" | "kcompactd" | "kswapd" | "jbd2" | "watchdog"
+    ) || trimmed.contains("kworker")
+        || trimmed.contains("writeback")
+        || trimmed.contains("flush-")
+        || trimmed.contains("jbd2/")
 }
 
 fn read_open_files(pid: i32) -> Vec<String> {
@@ -640,12 +758,17 @@ fn sort_processes(a: &ProcessSummary, b: &ProcessSummary) -> Ordering {
     b_total
         .partial_cmp(&a_total)
         .unwrap_or(Ordering::Equal)
+        .then_with(|| {
+            let a_logical = a.logical_read_bytes_per_sec + a.logical_write_bytes_per_sec;
+            let b_logical = b.logical_read_bytes_per_sec + b.logical_write_bytes_per_sec;
+            b_logical.partial_cmp(&a_logical).unwrap_or(Ordering::Equal)
+        })
         .then_with(|| a.pid.cmp(&b.pid))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_kv, summarize_directories, FileSummary};
+    use super::{is_kernel_like_command, parse_kv, summarize_directories, FileSummary};
 
     #[test]
     fn parses_proc_io_kv() {
@@ -664,5 +787,12 @@ mod tests {
         let dirs = summarize_directories(&files);
         assert_eq!(dirs[0].directory_path, "/tmp");
         assert_eq!(dirs[0].total_write_bytes, 20);
+    }
+
+    #[test]
+    fn identifies_kernel_style_commands() {
+        assert!(is_kernel_like_command("[kworker/u8:1-writeback]"));
+        assert!(is_kernel_like_command("jbd2/mmcblk0p2-8"));
+        assert!(!is_kernel_like_command("python3"));
     }
 }
