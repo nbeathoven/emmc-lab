@@ -375,11 +375,11 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             3 => match prompt_menu_default(
                 &format!(
-                    "Range [1=all, 2=sectors, 3=bytes] [{}]",
+                    "Range [1=all, 2=sectors, 3=bytes, 4=one sector] [{}]",
                     range_hint_label(&hints)
                 ),
                 addressing_choice(&profile.addressing.mode),
-                &["1", "2", "3"],
+                &["1", "2", "3", "4"],
             )? {
                 WizardInput::Value(value) => match value.as_str() {
                     "1" => {
@@ -470,6 +470,39 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                         profile.addressing.start_sector = None;
                         profile.addressing.sector_count = None;
                     }
+                    "4" => {
+                        let max_sector = hints
+                            .size_bytes
+                            .unwrap_or(1024 * 1024 * 1024)
+                            .saturating_div(hints.logical_sector_size.max(1))
+                            .saturating_sub(1);
+                        let start_sector = match prompt_u64_in_range(
+                            "Target sector [single logical sector]",
+                            profile.addressing.start_sector.unwrap_or(0),
+                            0,
+                            max_sector,
+                        )? {
+                            WizardInput::Value(value) => value,
+                            WizardInput::Back => continue,
+                            WizardInput::Cancel => return Ok(None),
+                        };
+                        profile.addressing.mode = AddressingMode::SectorRange;
+                        profile.addressing.start_sector = Some(start_sector);
+                        profile.addressing.sector_count = Some(1);
+                        profile.addressing.start_offset_bytes = None;
+                        profile.addressing.range_size_bytes = None;
+                        profile.workload.block_size_bytes = hints.logical_sector_size as usize;
+                        profile.workload.queue_depth = 1;
+                        profile.workload.worker_count = 1;
+                        if profile.workload.exact_op_count.is_none() {
+                            profile.workload.exact_op_count = Some(1_000_000);
+                            profile.workload.runtime_seconds = None;
+                        }
+                        println!(
+                            "Pinned to sector {}. Defaults: block {} B, queue 1, workers 1, ops 1000000.",
+                            start_sector, hints.logical_sector_size
+                        );
+                    }
                     _ => unreachable!(),
                 },
                 WizardInput::Back => {
@@ -523,12 +556,16 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             5 => match prompt_usize_in_range(
                 &format!(
                     "Block size bytes [rec {}, {}-1048576, sector {} B]",
-                    suggested_block_size(&hints),
-                    hints.logical_sector_size.max(512),
+                    suggested_block_size(&profile, &hints),
+                    block_size_floor(&profile, hints.logical_sector_size),
                     hints.logical_sector_size
                 ),
-                normalize_block_size(profile.workload.block_size_bytes, hints.logical_sector_size),
-                hints.logical_sector_size.max(512) as usize,
+                normalize_block_size(
+                    profile.workload.block_size_bytes,
+                    hints.logical_sector_size,
+                    block_size_floor(&profile, hints.logical_sector_size),
+                ),
+                block_size_floor(&profile, hints.logical_sector_size),
                 1_048_576,
             )? {
                 WizardInput::Value(value) => profile.workload.block_size_bytes = value,
@@ -1347,8 +1384,11 @@ fn apply_wizard_assumptions(profile: &mut Profile, hints: &WizardTargetHints) {
         profile.durability.mode = DurabilityMode::Performance;
     }
     if profile.workload.direct_io {
-        let normalized =
-            normalize_block_size(profile.workload.block_size_bytes, hints.logical_sector_size);
+        let normalized = normalize_block_size(
+            profile.workload.block_size_bytes,
+            hints.logical_sector_size,
+            block_size_floor(profile, hints.logical_sector_size),
+        );
         if normalized != profile.workload.block_size_bytes {
             println!(
                 "Adjusted block size from {} to {} for direct I/O alignment.",
@@ -1365,21 +1405,39 @@ fn apply_wizard_assumptions(profile: &mut Profile, hints: &WizardTargetHints) {
     }
 }
 
-fn normalize_block_size(current: usize, logical_sector_size: u64) -> usize {
+fn block_size_floor(profile: &Profile, logical_sector_size: u64) -> usize {
     let sector = logical_sector_size.max(512) as usize;
-    let recommended = sector.max(4096);
-    if current == 0 {
-        return recommended;
+    if is_single_sector_target(profile) {
+        sector
+    } else {
+        sector.max(4096)
     }
-    if current < recommended {
-        return recommended;
-    }
-    let rounded = ((current + sector - 1) / sector) * sector;
-    rounded.max(recommended)
 }
 
-fn suggested_block_size(hints: &WizardTargetHints) -> usize {
-    normalize_block_size(4096, hints.logical_sector_size)
+fn normalize_block_size(current: usize, logical_sector_size: u64, floor: usize) -> usize {
+    let sector = logical_sector_size.max(512) as usize;
+    let floor = floor.max(sector);
+    if current == 0 {
+        return floor;
+    }
+    if current < floor {
+        return floor;
+    }
+    let rounded = ((current + sector - 1) / sector) * sector;
+    rounded.max(floor)
+}
+
+fn suggested_block_size(profile: &Profile, hints: &WizardTargetHints) -> usize {
+    normalize_block_size(
+        4096,
+        hints.logical_sector_size,
+        block_size_floor(profile, hints.logical_sector_size),
+    )
+}
+
+fn is_single_sector_target(profile: &Profile) -> bool {
+    matches!(profile.addressing.mode, AddressingMode::SectorRange)
+        && profile.addressing.sector_count == Some(1)
 }
 
 fn suggested_worker_count() -> usize {
@@ -1390,8 +1448,11 @@ fn suggested_worker_count() -> usize {
 }
 
 fn minimum_runtime_file_size(profile: &Profile, logical_sector_size: u64) -> u64 {
-    let block = profile.workload.block_size_bytes.max(4096) as u64;
     let sector = logical_sector_size.max(512);
+    let block = profile
+        .workload
+        .block_size_bytes
+        .max(block_size_floor(profile, logical_sector_size)) as u64;
     let required = match profile.addressing.mode {
         AddressingMode::WholeSelectedRange => 64 * 1024 * 1024,
         AddressingMode::SectorRange => profile
@@ -1676,10 +1737,10 @@ fn poll_keypress_until(timeout: Duration) -> Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        device_rank, is_auxiliary_device, normalize_block_size, normalize_file_target_path,
-        parse_yes_no,
+        block_size_floor, device_rank, is_auxiliary_device, is_single_sector_target,
+        normalize_block_size, normalize_file_target_path, parse_yes_no,
     };
-    use crate::profile::TargetMode;
+    use crate::profile::{AddressingMode, Profile, TargetMode};
     use crate::system::DeviceInfo;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -1729,8 +1790,21 @@ mod tests {
 
     #[test]
     fn normalizes_small_direct_io_block_sizes() {
-        assert_eq!(normalize_block_size(12, 512), 4096);
-        assert_eq!(normalize_block_size(4097, 512), 4608);
+        let profile = Profile::default_named("test");
+        assert_eq!(block_size_floor(&profile, 512), 4096);
+        assert_eq!(normalize_block_size(12, 512, 4096), 4096);
+        assert_eq!(normalize_block_size(4097, 512, 4096), 4608);
+    }
+
+    #[test]
+    fn keeps_single_sector_block_size_at_logical_sector() {
+        let mut profile = Profile::default_named("single-sector");
+        profile.addressing.mode = AddressingMode::SectorRange;
+        profile.addressing.start_sector = Some(1234);
+        profile.addressing.sector_count = Some(1);
+        assert!(is_single_sector_target(&profile));
+        assert_eq!(block_size_floor(&profile, 512), 512);
+        assert_eq!(normalize_block_size(12, 512, 512), 512);
     }
 
     #[test]
