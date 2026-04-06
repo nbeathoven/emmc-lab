@@ -1123,7 +1123,12 @@ fn choose_file_target_path() -> Result<WizardInput<String>> {
         println!("0. Back");
         for (index, option) in options.iter().enumerate() {
             let suffix = if index == 0 { " [default]" } else { "" };
-            println!("{}. {}{}", index + 1, option.display(), suffix);
+            let size = fs::metadata(option)
+                .ok()
+                .filter(|meta| meta.is_file())
+                .map(|meta| format!(" [{}]", format_bytes(meta.len())))
+                .unwrap_or_default();
+            println!("{}. {}{}{}", index + 1, option.display(), size, suffix);
         }
         println!("{}. Enter path manually", options.len() + 1);
         match prompt_string_default(&format!("Pick file [0-{}]", options.len() + 1), Some("1"))? {
@@ -1581,11 +1586,32 @@ fn format_bytes(bytes: u64) -> String {
         value /= 1024.0;
         idx += 1;
     }
-    if idx == 0 {
+    let compact = if idx == 0 {
         format!("{bytes} {}", units[idx])
     } else {
         format!("{value:.1} {}", units[idx])
+    };
+    match idx {
+        0 => compact,
+        1 => format!("{compact} [{} B]", format_grouped_u64(bytes)),
+        2 => format!("{compact} [{} KiB]", format_grouped_u64(bytes / 1024)),
+        _ => format!(
+            "{compact} [{} MiB]",
+            format_grouped_u64(bytes / (1024 * 1024))
+        ),
     }
+}
+
+fn format_grouped_u64(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 fn target_mode_choice(mode: &TargetMode) -> &'static str {
@@ -1737,8 +1763,8 @@ fn poll_keypress_until(timeout: Duration) -> Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        block_size_floor, device_rank, is_auxiliary_device, is_single_sector_target,
-        normalize_block_size, normalize_file_target_path, parse_yes_no,
+        block_size_floor, device_rank, format_bytes, format_grouped_u64, is_auxiliary_device,
+        is_single_sector_target, normalize_block_size, normalize_file_target_path, parse_yes_no,
     };
     use crate::profile::{AddressingMode, Profile, TargetMode};
     use crate::system::DeviceInfo;
@@ -1805,6 +1831,13 @@ mod tests {
         assert!(is_single_sector_target(&profile));
         assert_eq!(block_size_floor(&profile, 512), 512);
         assert_eq!(normalize_block_size(12, 512, 512), 512);
+    }
+
+    #[test]
+    fn formats_grouped_sizes_for_operator_prompts() {
+        assert_eq!(format_grouped_u64(2048), "2,048");
+        assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB [2,048 KiB]");
+        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB [1,024 MiB]");
     }
 
     #[test]
