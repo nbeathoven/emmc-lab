@@ -20,6 +20,7 @@ pub enum DiagnosticMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct ProcessSummary {
     pub pid: i32,
     pub ppid: i32,
@@ -48,6 +49,7 @@ pub struct ProcessSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct FileSummary {
     pub file_path: String,
     pub last_pid_touching_file: i32,
@@ -62,6 +64,7 @@ pub struct FileSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct DirectorySummary {
     pub directory_path: String,
     pub total_read_bytes: u64,
@@ -71,6 +74,7 @@ pub struct DirectorySummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct DeviceSummary {
     pub device: String,
     pub reads_completed: u64,
@@ -83,6 +87,7 @@ pub struct DeviceSummary {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct RestrictedProcessSummary {
     pub pid: i32,
     pub ppid: i32,
@@ -98,16 +103,27 @@ pub struct DiagnosticReport {
     pub started_at: DateTime<Utc>,
     pub ended_at: DateTime<Utc>,
     pub duration_seconds: u64,
+    #[serde(default)]
     pub top_processes: Vec<ProcessSummary>,
+    #[serde(default)]
     pub top_files: Vec<FileSummary>,
+    #[serde(default)]
     pub top_directories: Vec<DirectorySummary>,
+    #[serde(default)]
     pub device_totals: Vec<DeviceSummary>,
+    #[serde(default)]
     pub restricted_process_count: u64,
+    #[serde(default)]
     pub kernel_process_count: u64,
+    #[serde(default)]
     pub restricted_processes: Vec<RestrictedProcessSummary>,
+    #[serde(default)]
     pub unresolved_path_count: u64,
+    #[serde(default)]
     pub dropped_event_count: u64,
+    #[serde(default)]
     pub attribution_note: String,
+    #[serde(default)]
     pub fallback_message: Option<String>,
 }
 
@@ -768,7 +784,10 @@ fn sort_processes(a: &ProcessSummary, b: &ProcessSummary) -> Ordering {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_kernel_like_command, parse_kv, summarize_directories, FileSummary};
+    use super::{
+        is_kernel_like_command, parse_kv, summarize_directories, DiagnosticReport, FileSummary,
+    };
+    use chrono::{TimeZone, Utc};
 
     #[test]
     fn parses_proc_io_kv() {
@@ -794,5 +813,43 @@ mod tests {
         assert!(is_kernel_like_command("[kworker/u8:1-writeback]"));
         assert!(is_kernel_like_command("jbd2/mmcblk0p2-8"));
         assert!(!is_kernel_like_command("python3"));
+    }
+
+    #[test]
+    fn deserializes_older_diagnostic_reports_with_missing_process_fields() {
+        let json = format!(
+            r#"{{
+                "mode": "sample",
+                "session_id": null,
+                "started_at": "{}",
+                "ended_at": "{}",
+                "duration_seconds": 60,
+                "top_processes": [
+                    {{
+                        "pid": 42,
+                        "ppid": 1,
+                        "user": "root",
+                        "command": "old-proc",
+                        "exe_path": "/usr/bin/old-proc",
+                        "cwd": "/"
+                    }}
+                ],
+                "top_files": [],
+                "device_totals": []
+            }}"#,
+            Utc.with_ymd_and_hms(2026, 4, 6, 0, 0, 0)
+                .single()
+                .unwrap()
+                .to_rfc3339(),
+            Utc.with_ymd_and_hms(2026, 4, 6, 0, 1, 0)
+                .single()
+                .unwrap()
+                .to_rfc3339()
+        );
+        let report: DiagnosticReport = serde_json::from_str(&json).expect("old diagnostic report");
+        assert_eq!(report.top_processes.len(), 1);
+        assert_eq!(report.top_processes[0].logical_read_bytes, 0);
+        assert_eq!(report.restricted_process_count, 0);
+        assert!(report.attribution_note.is_empty());
     }
 }
