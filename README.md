@@ -9,7 +9,7 @@
 - JSON, CSV, and HTML reporting
 - an SSH-friendly interactive menu plus direct automation commands
 
-Current release: `v0.2.0`
+Current release: `v0.2.2`
 
 License: [MIT](LICENSE)
 
@@ -101,6 +101,81 @@ Check device health:
 
 ```bash
 emmc-lab health --device /dev/mmcblk0
+```
+
+## Usage Examples
+
+Interactive menu:
+
+```bash
+emmc-lab
+```
+
+Open the guided wizard directly:
+
+```bash
+emmc-lab wizard
+```
+
+Run a saved profile:
+
+```bash
+emmc-lab run --profile ~/.config/emmc-lab/profiles/test.yaml
+```
+
+Run `1,000,000` logical reads against one logical sector from the menu:
+
+1. `emmc-lab`
+2. `1. New Test Run`
+3. `Mode`: `1=raw` or `2=file`
+4. `Workload`: `1=randread`
+5. `Range`: `4=one sector`
+6. `Target sector`: enter the logical sector number
+7. `Stop`: `2=ops`
+8. `Exact operation count`: press Enter to keep `1000000`
+9. `Block size`: press Enter to keep the logical sector size, usually `512`
+10. finish the wizard and run
+
+Run `1,000,000` logical writes inside a selected logical sector range:
+
+```bash
+emmc-lab run --profile examples/million-randwrite-range.yaml --i-understand-this-will-destroy-data
+```
+
+Run the live I/O monitor with 1 second refresh:
+
+```bash
+sudo emmc-lab diag monitor --interval-ms 1000
+```
+
+Run a timed sampler for 60 seconds:
+
+```bash
+emmc-lab diag sample --duration 60 --interval-ms 1000
+```
+
+Run deep trace for 30 seconds, with sampler fallback if tracing is unavailable:
+
+```bash
+sudo emmc-lab diag trace --duration 30 --fallback-to-sampler
+```
+
+Export an HTML report for a saved session:
+
+```bash
+emmc-lab export --session 20260404T052158-d71f295942c342398805398f3a3a4beb --format html
+```
+
+List detected block devices:
+
+```bash
+emmc-lab list-devices
+```
+
+Run environment and capability checks:
+
+```bash
+emmc-lab doctor
 ```
 
 ## Raspberry Pi Install
@@ -204,7 +279,7 @@ If an optional feature is unavailable, `emmc-lab` reports that clearly and falls
 
 ## Versioning and Releases
 
-- Crate version: `0.2.0`
+- Crate version: `0.2.2`
 - License: `MIT`
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - GitHub releases: [Releases](https://github.com/nbeathoven/emmc-lab/releases)
