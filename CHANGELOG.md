@@ -2,6 +2,16 @@
 
 All notable changes to `emmc-lab` are documented in this file.
 
+## v0.2.3 - 2026-04-06
+
+- added a one-sector wizard preset for exact-count logical-sector read and write runs
+- kept old session reports readable when diagnostics fields are missing from earlier JSON schema versions
+- improved live monitor attribution visibility for restricted and kernel-like activity
+- kept live monitor headers visible on shorter terminals by tightening layout thresholds
+- improved operator-facing size prompts with grouped exact values in brackets
+- fixed wizard block-size alignment for sector-range runs so invalid defaults are corrected before execution
+- expanded the root README with direct usage examples for monitor, health, exports, and one-sector runs
+
 ## v0.2.2 - 2026-04-04
 
 - reduced wizard friction with default answers, typed target discovery, smarter assumptions, and range-aware prompts
