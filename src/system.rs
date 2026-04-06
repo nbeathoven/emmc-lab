@@ -62,6 +62,10 @@ pub struct SystemSnapshot {
 pub struct DeviceInfo {
     pub path: PathBuf,
     pub name: String,
+    #[serde(default)]
+    pub parent: Option<String>,
+    #[serde(default)]
+    pub is_partition: bool,
     pub media_type: Option<String>,
     pub model: Option<String>,
     pub size_bytes: Option<u64>,
@@ -214,7 +218,7 @@ pub fn doctor(paths: &AppPaths) -> DoctorReport {
 }
 
 pub fn list_devices() -> Result<Vec<DeviceInfo>> {
-    if !Path::new("/sys/block").exists() {
+    if !Path::new("/sys/class/block").exists() {
         return Ok(Vec::new());
     }
     let mounts = parse_mountinfo()?;
@@ -223,10 +227,13 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
         .find(|m| m.mountpoint == "/")
         .map(|m| m.source.clone());
     let mut devices = Vec::new();
-    for entry in fs::read_dir("/sys/block").context("read /sys/block")? {
+    for entry in fs::read_dir("/sys/class/block").context("read /sys/class/block")? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().to_string();
         let dev_path = PathBuf::from("/dev").join(&name);
+        let sys_path = entry.path();
+        let is_partition = sys_path.join("partition").exists();
+        let parent = partition_parent_name(&sys_path, is_partition);
         let model = read_trimmed(entry.path().join("device/model"));
         let media_type = read_trimmed(entry.path().join("device/type"));
         let size_bytes = read_trimmed(entry.path().join("size"))
@@ -255,6 +262,8 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
         devices.push(DeviceInfo {
             path: dev_path.clone(),
             name,
+            parent,
+            is_partition,
             media_type,
             model,
             size_bytes,
@@ -272,6 +281,20 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
     }
     devices.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(devices)
+}
+
+fn partition_parent_name(sys_path: &Path, is_partition: bool) -> Option<String> {
+    if !is_partition {
+        return None;
+    }
+    let canonical = fs::canonicalize(sys_path).ok()?;
+    let parent = canonical.parent()?;
+    let name = parent.file_name()?.to_string_lossy().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 pub fn assess_raw_target_safety(

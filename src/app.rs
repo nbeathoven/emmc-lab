@@ -3,6 +3,10 @@ use crate::diagnostics::{
 };
 use crate::engine::execute_profile;
 use crate::health::{collect_health, read_emmc_health};
+use crate::presets::{
+    category_label, preset_categories, presets_in_category, resolve_preset, PresetId,
+    PresetTargetScope,
+};
 use crate::profile::{AddressingMode, DurabilityMode, Profile, TargetMode, WorkloadType};
 use crate::report::{export_session, terminal_summary, ExportFormat};
 use crate::storage::{
@@ -53,44 +57,71 @@ enum WizardInput<T> {
 }
 
 pub fn run_menu(paths: &AppPaths) -> Result<()> {
+    let mut last_profile = None::<Profile>;
     loop {
         println!();
         println!("emmc-lab v{}", env!("CARGO_PKG_VERSION"));
-        println!("1. New Test Run");
-        println!("2. Run Saved Profile");
-        println!("3. Diagnostic Mode - Live Monitor");
-        println!("4. Diagnostic Mode - Deep Trace");
-        println!("5. Device Health / eMMC Health");
-        println!("6. Reports / Export");
-        println!("7. Settings / Paths / Defaults");
-        println!("8. Help");
-        println!("9. Exit");
+        println!("1. Run Workload");
+        println!("2. Diagnostics");
+        println!("3. Device Health / eMMC Health");
+        println!("4. Reports / Export");
+        println!("5. Settings / Paths / Defaults");
+        println!("6. Help");
+        println!("7. Exit");
         match prompt_menu_default(
-            "Select an option [1-9]",
+            "Select an option [1-7]",
             "1",
-            &["1", "2", "3", "4", "5", "6", "7", "8", "9"],
+            &["1", "2", "3", "4", "5", "6", "7"],
         )? {
             WizardInput::Value(value) if value == "1" => {
-                if let Some(outcome) = wizard(paths, None)? {
-                    if outcome.run_now {
-                        run_profile_session_interactive(paths, outcome.profile)?;
-                    }
-                }
+                run_workload_flow(paths, &mut last_profile)?
             }
-            WizardInput::Value(value) if value == "2" => run_saved_profile_flow(paths)?,
-            WizardInput::Value(value) if value == "3" => live_sampler_flow(paths)?,
-            WizardInput::Value(value) if value == "4" => deep_trace_flow(paths)?,
-            WizardInput::Value(value) if value == "5" => health_flow(paths)?,
-            WizardInput::Value(value) if value == "6" => reports_flow(paths)?,
-            WizardInput::Value(value) if value == "7" => settings_flow(paths)?,
-            WizardInput::Value(value) if value == "8" => print_help(paths),
-            WizardInput::Value(value) if value == "9" => break,
+            WizardInput::Value(value) if value == "2" => diagnostics_flow(paths)?,
+            WizardInput::Value(value) if value == "3" => health_flow(paths)?,
+            WizardInput::Value(value) if value == "4" => reports_flow(paths)?,
+            WizardInput::Value(value) if value == "5" => settings_flow(paths)?,
+            WizardInput::Value(value) if value == "6" => print_help(paths),
+            WizardInput::Value(value) if value == "7" => break,
             WizardInput::Back => continue,
             WizardInput::Cancel => break,
             WizardInput::Value(_) => unreachable!(),
         }
     }
     Ok(())
+}
+
+fn run_workload_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Result<()> {
+    loop {
+        println!("1. Quick Presets");
+        println!("2. Guided Custom Run");
+        println!("3. Saved Profiles");
+        println!("4. Repeat Last Run");
+        println!("5. Back");
+        match prompt_menu_default("Action [1-5]", "5", &["1", "2", "3", "4", "5"])? {
+            WizardInput::Value(value) if value == "1" => quick_presets_flow(paths, last_profile)?,
+            WizardInput::Value(value) if value == "2" => {
+                if let Some(outcome) = wizard(paths, None)? {
+                    if outcome.run_now {
+                        let profile = outcome.profile.clone();
+                        run_profile_session_interactive(paths, outcome.profile)?;
+                        *last_profile = Some(profile);
+                    }
+                }
+            }
+            WizardInput::Value(value) if value == "3" => {
+                run_saved_profile_flow(paths, last_profile)?
+            }
+            WizardInput::Value(value) if value == "4" => {
+                let Some(profile) = last_profile.clone() else {
+                    println!("No previous workload run in this session.");
+                    continue;
+                };
+                run_profile_session_interactive(paths, profile.clone())?;
+                *last_profile = Some(profile);
+            }
+            _ => return Ok(()),
+        }
+    }
 }
 
 pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String> {
@@ -769,7 +800,149 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
     }
 }
 
-fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
+fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Result<()> {
+    loop {
+        let categories = preset_categories();
+        println!("0. Back");
+        for (index, category) in categories.iter().enumerate() {
+            println!("{}. {}", index + 1, category_label(*category));
+        }
+        let choice = match prompt_usize_in_range(
+            &format!("Pick preset group [0-{}]", categories.len()),
+            0,
+            0,
+            categories.len(),
+        )? {
+            WizardInput::Value(value) => value,
+            WizardInput::Back | WizardInput::Cancel => return Ok(()),
+        };
+        if choice == 0 {
+            return Ok(());
+        }
+        let category = categories[choice - 1];
+        let presets = presets_in_category(category);
+        println!("0. Back");
+        for (index, preset) in presets.iter().enumerate() {
+            println!(
+                "{}. {} [{}{}]",
+                index + 1,
+                preset.name,
+                preset_scope_label(preset.target_scope),
+                if preset.destructive {
+                    ", destructive"
+                } else {
+                    ""
+                }
+            );
+            println!("   {}", preset.description);
+        }
+        let preset_choice = match prompt_usize_in_range(
+            &format!("Pick preset [0-{}]", presets.len()),
+            0,
+            0,
+            presets.len(),
+        )? {
+            WizardInput::Value(value) => value,
+            WizardInput::Back | WizardInput::Cancel => continue,
+        };
+        if preset_choice == 0 {
+            continue;
+        }
+        let preset = presets[preset_choice - 1];
+        let mut device = None::<DeviceInfo>;
+        let mut sector = None::<u64>;
+        match preset.target_scope {
+            PresetTargetScope::File => {}
+            PresetTargetScope::Partition => {
+                let devices = list_devices()?
+                    .into_iter()
+                    .filter(|candidate| candidate.is_partition && !is_auxiliary_device(candidate))
+                    .collect::<Vec<_>>();
+                if devices.is_empty() {
+                    println!("No partitions discovered for this preset.");
+                    continue;
+                }
+                let Some(path) = choose_device_path(&devices, "Select partition target", false)?
+                else {
+                    continue;
+                };
+                device = devices.into_iter().find(|candidate| candidate.path == path);
+            }
+            PresetTargetScope::RawDevice => {
+                let devices = list_devices()?
+                    .into_iter()
+                    .filter(|candidate| !candidate.is_partition && !is_auxiliary_device(candidate))
+                    .collect::<Vec<_>>();
+                if devices.is_empty() {
+                    println!("No raw block devices discovered for this preset.");
+                    continue;
+                }
+                let Some(path) = choose_device_path(&devices, "Select raw target", false)? else {
+                    continue;
+                };
+                device = devices.into_iter().find(|candidate| candidate.path == path);
+            }
+        }
+
+        if matches!(
+            preset.id,
+            PresetId::OneSectorMillionReads | PresetId::OneSectorMillionWrites
+        ) {
+            let Some(target) = device.as_ref() else {
+                println!("A block device is required for this preset.");
+                continue;
+            };
+            let sector_size = target.logical_block_size.unwrap_or(512).max(1);
+            let max_sector = target
+                .size_bytes
+                .unwrap_or(1024 * 1024 * 1024)
+                .saturating_div(sector_size)
+                .saturating_sub(1);
+            sector = match prompt_u64_in_range(
+                "Target sector [single logical sector]",
+                0,
+                0,
+                max_sector,
+            )? {
+                WizardInput::Value(value) => Some(value),
+                WizardInput::Back | WizardInput::Cancel => continue,
+            };
+        }
+
+        let profile = resolve_preset(preset, paths, device.as_ref(), sector);
+        println!();
+        println!("Preset: {}", preset.name);
+        println!("Description: {}", preset.description);
+        println!("{}", profile.printable_summary());
+        println!("1. Run now");
+        println!("2. Edit before run");
+        println!("3. Save as profile");
+        println!("4. Back");
+        match prompt_menu_default("Action [1-4]", "4", &["1", "2", "3", "4"])? {
+            WizardInput::Value(value) if value == "1" => {
+                run_profile_session_interactive(paths, profile.clone())?;
+                *last_profile = Some(profile);
+            }
+            WizardInput::Value(value) if value == "2" => {
+                if let Some(updated) = wizard(paths, Some(profile.clone()))? {
+                    if updated.run_now {
+                        let final_profile = updated.profile.clone();
+                        run_profile_session_interactive(paths, updated.profile)?;
+                        *last_profile = Some(final_profile);
+                    }
+                }
+            }
+            WizardInput::Value(value) if value == "3" => {
+                let profile_path = infer_profile_path(paths, &profile.name);
+                profile.save(&profile_path)?;
+                println!("Saved profile: {}", profile_path.display());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn run_saved_profile_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Result<()> {
     let profiles = list_profiles(paths)?;
     if profiles.is_empty() {
         println!(
@@ -801,12 +974,15 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
     println!("3. Back");
     match prompt_menu_default("Action [1-3]", "3", &["1", "2", "3"])? {
         WizardInput::Value(value) if value == "1" => {
-            run_profile_session_interactive(paths, profile)?;
+            run_profile_session_interactive(paths, profile.clone())?;
+            *last_profile = Some(profile);
         }
         WizardInput::Value(value) if value == "2" => {
             if let Some(updated) = wizard(paths, Some(profile))? {
                 if updated.run_now {
+                    let profile = updated.profile.clone();
                     run_profile_session_interactive(paths, updated.profile)?;
+                    *last_profile = Some(profile);
                 }
             }
         }
@@ -815,39 +991,49 @@ fn run_saved_profile_flow(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
-fn live_sampler_flow(paths: &AppPaths) -> Result<()> {
-    println!("1. Live monitor");
-    println!("2. Timed capture");
-    println!("3. Back");
-    match prompt_menu_default("Action [1-3]", "3", &["1", "2", "3"])? {
-        WizardInput::Value(value) if value == "1" => {
-            let duration =
-                match prompt_u64_in_range("Monitor seconds [rec 0, 0=until q]", 0, 0, 86_400)? {
+fn diagnostics_flow(paths: &AppPaths) -> Result<()> {
+    loop {
+        println!("1. Live Monitor");
+        println!("2. Timed Capture");
+        println!("3. Deep Trace");
+        println!("4. Back");
+        match prompt_menu_default("Action [1-4]", "4", &["1", "2", "3", "4"])? {
+            WizardInput::Value(value) if value == "1" => {
+                let duration = match prompt_u64_in_range(
+                    "Monitor seconds [rec 0, 0=until q]",
+                    0,
+                    0,
+                    86_400,
+                )? {
                     WizardInput::Value(value) => value,
-                    WizardInput::Back | WizardInput::Cancel => return Ok(()),
+                    WizardInput::Back | WizardInput::Cancel => continue,
                 };
-            let interval = match prompt_u64_in_range("Refresh ms [rec 1000]", 1000, 250, 60_000)? {
-                WizardInput::Value(value) => value,
-                WizardInput::Back | WizardInput::Cancel => return Ok(()),
-            };
-            run_diag_monitor(duration, interval)?;
-            pause()?;
-            Ok(())
+                let interval =
+                    match prompt_u64_in_range("Refresh ms [rec 1000]", 1000, 250, 60_000)? {
+                        WizardInput::Value(value) => value,
+                        WizardInput::Back | WizardInput::Cancel => continue,
+                    };
+                run_diag_monitor(duration, interval)?;
+                pause()?;
+            }
+            WizardInput::Value(value) if value == "2" => timed_capture_flow(paths)?,
+            WizardInput::Value(value) if value == "3" => deep_trace_flow(paths)?,
+            _ => return Ok(()),
         }
-        WizardInput::Value(value) if value == "2" => {
-            let duration = match prompt_u64_in_range("Sampler seconds [rec 60]", 60, 1, 86_400)? {
-                WizardInput::Value(value) => value,
-                WizardInput::Back | WizardInput::Cancel => return Ok(()),
-            };
-            let interval = match prompt_u64_in_range("Sample ms [rec 1000]", 1000, 100, 60_000)? {
-                WizardInput::Value(value) => value,
-                WizardInput::Back | WizardInput::Cancel => return Ok(()),
-            };
-            let _ = run_diag_sample(paths, duration, interval)?;
-            Ok(())
-        }
-        _ => Ok(()),
     }
+}
+
+fn timed_capture_flow(paths: &AppPaths) -> Result<()> {
+    let duration = match prompt_u64_in_range("Sampler seconds [rec 60]", 60, 1, 86_400)? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(()),
+    };
+    let interval = match prompt_u64_in_range("Sample ms [rec 1000]", 1000, 100, 60_000)? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(()),
+    };
+    let _ = run_diag_sample(paths, duration, interval)?;
+    Ok(())
 }
 
 fn deep_trace_flow(paths: &AppPaths) -> Result<()> {
@@ -947,6 +1133,7 @@ fn settings_flow(paths: &AppPaths) -> Result<()> {
 
 fn print_help(paths: &AppPaths) {
     println!("Interactive launch: emmc-lab");
+    println!("Run Workload -> Quick Presets: built-in named workloads resolved against current devices and files");
     println!("Guided wizard: emmc-lab wizard");
     println!(
         "Run saved profile: emmc-lab run --profile {}",
@@ -1545,7 +1732,26 @@ fn range_hint_label(hints: &WizardTargetHints) -> String {
         .unwrap_or_else(|| "target size discovered at run time".to_string())
 }
 
+fn preset_scope_label(scope: PresetTargetScope) -> &'static str {
+    match scope {
+        PresetTargetScope::File => "file",
+        PresetTargetScope::Partition => "partition",
+        PresetTargetScope::RawDevice => "raw",
+    }
+}
+
 fn device_selection_label(device: &DeviceInfo) -> String {
+    let target_kind = if device.is_partition {
+        match device.parent.as_deref() {
+            Some(parent) => format!("partition of {parent}"),
+            None => "partition".to_string(),
+        }
+    } else {
+        device
+            .media_type
+            .clone()
+            .unwrap_or_else(|| device_family_name(&device.path).to_string())
+    };
     let mount_info = if device.mountpoints.is_empty() {
         "not mounted".to_string()
     } else {
@@ -1576,10 +1782,7 @@ fn device_selection_label(device: &DeviceInfo) -> String {
     format!(
         "{} [{}{}, sector {} B, {}, root={}]",
         device.path.display(),
-        device
-            .media_type
-            .clone()
-            .unwrap_or_else(|| device_family_name(&device.path).to_string()),
+        target_kind,
         device
             .size_bytes
             .map(|size| format!(", {}", format_bytes(size)))

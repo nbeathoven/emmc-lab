@@ -43,6 +43,7 @@ Diagnostic mode works in two levels:
 ## Main Features
 
 - interactive main menu with wizard-based test creation
+- embedded quick presets with names and descriptions for common file, partition, raw-device, and focused logical-sector runs
 - direct commands for automation
 - YAML saved profiles
 - exact `op_count` stopping
@@ -78,6 +79,13 @@ Open the interactive menu:
 ```bash
 emmc-lab
 ```
+
+The interactive menu now groups workload entry under `Run Workload`, with:
+
+- `Quick Presets`
+- `Guided Custom Run`
+- `Saved Profiles`
+- `Repeat Last Run`
 
 Run the wizard directly:
 
@@ -126,15 +134,13 @@ emmc-lab run --profile ~/.config/emmc-lab/profiles/test.yaml
 Run `1,000,000` logical reads against one logical sector from the menu:
 
 1. `emmc-lab`
-2. `1. New Test Run`
-3. `Mode`: `1=raw` or `2=file`
-4. `Workload`: `1=randread`
-5. `Range`: `4=one sector`
-6. `Target sector`: enter the logical sector number
-7. `Stop`: `2=ops`
-8. `Exact operation count`: press Enter to keep `1000000`
-9. `Block size`: press Enter to keep the logical sector size, usually `512`
-10. finish the wizard and run
+2. `1. Run Workload`
+3. `1. Quick Presets` or `2. Guided Custom Run`
+4. if using presets, pick `Focused Logical Range Presets` -> `One Sector 1M Reads`
+5. if using the wizard, choose `Range` -> `4=one sector`
+6. choose the target device
+7. `Target sector`: enter the logical sector number
+8. finish the preset flow or wizard and run
 
 Run `1,000,000` logical writes inside a selected logical sector range:
 

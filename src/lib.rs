@@ -3,6 +3,7 @@ pub mod cli;
 pub mod diagnostics;
 pub mod engine;
 pub mod health;
+pub mod presets;
 pub mod profile;
 pub mod report;
 pub mod storage;

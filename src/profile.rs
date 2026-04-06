@@ -143,6 +143,8 @@ pub struct SafetyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Profile {
     pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
     pub target: TargetConfig,
     pub workload: WorkloadConfig,
     pub addressing: AddressingConfig,
@@ -165,6 +167,7 @@ impl Profile {
     pub fn default_named(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            description: None,
             target: TargetConfig {
                 mode: TargetMode::FileBased,
                 path: PathBuf::from("/tmp/emmc-lab.bin"),
@@ -411,6 +414,7 @@ impl Profile {
         format!(
             concat!(
                 "Profile: {name}\n",
+                "Description: {description}\n",
                 "Target mode: {target_mode}\n",
                 "Target path: {target_path}\n",
                 "Create missing file size: {create_if_missing}\n",
@@ -429,6 +433,7 @@ impl Profile {
                 "Note: logical sector/LBA targeting only; this does not guarantee fixed physical NAND cell targeting."
             ),
             name = self.name,
+            description = self.description.as_deref().unwrap_or("-"),
             target_mode = self.target.mode,
             target_path = self.target.path.display(),
             create_if_missing = self
