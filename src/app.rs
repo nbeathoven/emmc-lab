@@ -1388,19 +1388,13 @@ fn apply_wizard_assumptions(profile: &mut Profile, hints: &WizardTargetHints) {
         profile.verification.enabled = false;
         profile.durability.mode = DurabilityMode::Performance;
     }
-    if profile.workload.direct_io {
-        let normalized = normalize_block_size(
-            profile.workload.block_size_bytes,
-            hints.logical_sector_size,
-            block_size_floor(profile, hints.logical_sector_size),
+    let normalized = adjusted_block_size(profile, hints.logical_sector_size);
+    if normalized != profile.workload.block_size_bytes {
+        println!(
+            "Adjusted block size from {} to {} for target alignment.",
+            profile.workload.block_size_bytes, normalized
         );
-        if normalized != profile.workload.block_size_bytes {
-            println!(
-                "Adjusted block size from {} to {} for direct I/O alignment.",
-                profile.workload.block_size_bytes, normalized
-            );
-            profile.workload.block_size_bytes = normalized;
-        }
+        profile.workload.block_size_bytes = normalized;
     }
     if !hints.health_supported {
         profile.telemetry.health_telemetry = false;
@@ -1412,7 +1406,7 @@ fn apply_wizard_assumptions(profile: &mut Profile, hints: &WizardTargetHints) {
 
 fn block_size_floor(profile: &Profile, logical_sector_size: u64) -> usize {
     let sector = logical_sector_size.max(512) as usize;
-    if is_single_sector_target(profile) {
+    if matches!(profile.addressing.mode, AddressingMode::SectorRange) {
         sector
     } else {
         sector.max(4096)
@@ -1433,16 +1427,54 @@ fn normalize_block_size(current: usize, logical_sector_size: u64, floor: usize) 
 }
 
 fn suggested_block_size(profile: &Profile, hints: &WizardTargetHints) -> usize {
-    normalize_block_size(
+    let base = normalize_block_size(
         4096,
         hints.logical_sector_size,
         block_size_floor(profile, hints.logical_sector_size),
-    )
+    );
+    sector_aligned_block_size(profile, hints.logical_sector_size, base)
 }
 
+#[cfg(test)]
 fn is_single_sector_target(profile: &Profile) -> bool {
     matches!(profile.addressing.mode, AddressingMode::SectorRange)
         && profile.addressing.sector_count == Some(1)
+}
+
+fn adjusted_block_size(profile: &Profile, logical_sector_size: u64) -> usize {
+    let normalized = normalize_block_size(
+        profile.workload.block_size_bytes,
+        logical_sector_size,
+        block_size_floor(profile, logical_sector_size),
+    );
+    sector_aligned_block_size(profile, logical_sector_size, normalized)
+}
+
+fn sector_aligned_block_size(
+    profile: &Profile,
+    logical_sector_size: u64,
+    requested: usize,
+) -> usize {
+    if !matches!(profile.addressing.mode, AddressingMode::SectorRange) {
+        return requested;
+    }
+    let sector = logical_sector_size.max(512);
+    let start_sector = profile.addressing.start_sector.unwrap_or(0);
+    let sector_count = profile.addressing.sector_count.unwrap_or(0).max(1);
+    let start_bytes = start_sector.saturating_mul(sector);
+    let range_bytes = sector_count.saturating_mul(sector);
+    let floor = block_size_floor(profile, logical_sector_size) as u64;
+    let mut candidate = ((requested as u64) / sector).max(1).saturating_mul(sector);
+    while candidate >= floor {
+        if candidate <= range_bytes && start_bytes % candidate == 0 {
+            return candidate as usize;
+        }
+        if candidate <= sector {
+            break;
+        }
+        candidate = candidate.saturating_sub(sector);
+    }
+    sector as usize
 }
 
 fn suggested_worker_count() -> usize {
@@ -1763,8 +1795,9 @@ fn poll_keypress_until(timeout: Duration) -> Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        block_size_floor, device_rank, format_bytes, format_grouped_u64, is_auxiliary_device,
-        is_single_sector_target, normalize_block_size, normalize_file_target_path, parse_yes_no,
+        adjusted_block_size, block_size_floor, device_rank, format_bytes, format_grouped_u64,
+        is_auxiliary_device, is_single_sector_target, normalize_block_size,
+        normalize_file_target_path, parse_yes_no,
     };
     use crate::profile::{AddressingMode, Profile, TargetMode};
     use crate::system::DeviceInfo;
@@ -1838,6 +1871,16 @@ mod tests {
         assert_eq!(format_grouped_u64(2048), "2,048");
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB [2,048 KiB]");
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB [1,024 MiB]");
+    }
+
+    #[test]
+    fn reduces_sector_range_block_size_to_preserve_start_alignment() {
+        let mut profile = Profile::default_named("sector-range");
+        profile.addressing.mode = AddressingMode::SectorRange;
+        profile.addressing.start_sector = Some(4);
+        profile.addressing.sector_count = Some(1_048_576);
+        profile.workload.block_size_bytes = 4096;
+        assert_eq!(adjusted_block_size(&profile, 512), 2048);
     }
 
     #[test]
