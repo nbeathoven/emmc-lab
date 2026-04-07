@@ -26,6 +26,18 @@ struct Ui {
     color: bool,
 }
 
+pub struct SelectorColumn<'a> {
+    pub header: &'a str,
+    pub min: usize,
+    pub max: usize,
+    pub align_right: bool,
+}
+
+pub struct SelectorRow {
+    pub cells: Vec<String>,
+    pub detail: String,
+}
+
 impl Ui {
     fn detect() -> Self {
         let width = stdout_width()
@@ -871,6 +883,63 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
             let _ = writeln!(&mut out, "- {}", note);
         }
     }
+    out
+}
+
+pub fn render_selector_screen(
+    title: &str,
+    breadcrumb: &str,
+    summary_rows: &[(String, String)],
+    columns: &[SelectorColumn<'_>],
+    rows: &[SelectorRow],
+    selected: usize,
+    footer: &str,
+) -> String {
+    let ui = Ui::detect();
+    let mut out = ui.banner(title);
+    if !breadcrumb.is_empty() {
+        out.push_str(&ui.note("Path:", breadcrumb));
+    }
+
+    let summary_panel = if summary_rows.is_empty() {
+        String::new()
+    } else {
+        ui.kv_table("Context", summary_rows)
+    };
+
+    let row_cells = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let marker = if index == selected { ">" } else { " " };
+            let mut cells = vec![marker.to_string()];
+            cells.extend(row.cells.clone());
+            cells
+        })
+        .collect::<Vec<_>>();
+    let mut selector_columns = vec![Column {
+        header: " ",
+        min: 1,
+        max: 1,
+        align: Align::Left,
+    }];
+    selector_columns.extend(columns.iter().map(|column| Column {
+        header: column.header,
+        min: column.min,
+        max: column.max,
+        align: if column.align_right {
+            Align::Right
+        } else {
+            Align::Left
+        },
+    }));
+    let list_panel = ui.table("Select", &selector_columns, &row_cells);
+    out.push_str(&ui.pair(list_panel, summary_panel));
+
+    if let Some(current) = rows.get(selected) {
+        out.push_str(&ui.note("Detail:", &current.detail));
+    }
+    out.push_str(&ui.note("Keys:", footer));
     out
 }
 

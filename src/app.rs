@@ -18,7 +18,7 @@ use crate::system::{
 };
 use crate::ui::{
     render_device_list, render_doctor_report, render_health_report, render_live_monitor,
-    render_settings,
+    render_selector_screen, render_settings, SelectorColumn, SelectorRow,
 };
 use anyhow::{bail, Result};
 use chrono::Utc;
@@ -56,35 +56,78 @@ enum WizardInput<T> {
     Cancel,
 }
 
+struct MenuItem {
+    columns: Vec<String>,
+    detail: String,
+}
+
+enum MenuKey {
+    Up,
+    Down,
+    Enter,
+    Escape,
+    Quit,
+}
+
 pub fn run_menu(paths: &AppPaths) -> Result<()> {
     let mut last_profile = None::<Profile>;
     loop {
-        println!();
-        println!("emmc-lab v{}", env!("CARGO_PKG_VERSION"));
-        println!("1. Run Workload");
-        println!("2. Diagnostics");
-        println!("3. Device Health / eMMC Health");
-        println!("4. Reports / Export");
-        println!("5. Settings / Paths / Defaults");
-        println!("6. Help");
-        println!("7. Exit");
-        match prompt_menu_default(
-            "Select an option [1-7]",
-            "1",
-            &["1", "2", "3", "4", "5", "6", "7"],
-        )? {
-            WizardInput::Value(value) if value == "1" => {
-                run_workload_flow(paths, &mut last_profile)?
-            }
-            WizardInput::Value(value) if value == "2" => diagnostics_flow(paths)?,
-            WizardInput::Value(value) if value == "3" => health_flow(paths)?,
-            WizardInput::Value(value) if value == "4" => reports_flow(paths)?,
-            WizardInput::Value(value) if value == "5" => settings_flow(paths)?,
-            WizardInput::Value(value) if value == "6" => print_help(paths),
-            WizardInput::Value(value) if value == "7" => break,
-            WizardInput::Back => continue,
-            WizardInput::Cancel => break,
-            WizardInput::Value(_) => unreachable!(),
+        let items = vec![
+            MenuItem {
+                columns: vec!["Run Workload".to_string(), "presets, wizard, saved, repeat".to_string()],
+                detail: "Open workload entry points including quick presets, guided custom runs, saved profiles, and repeat-last-run.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Diagnostics".to_string(), "live monitor, capture, deep trace".to_string()],
+                detail: "Launch the live monitor, save a timed capture, or try deep trace with fallback guidance.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Device Health".to_string(), "mmc health and host snapshot".to_string()],
+                detail: "Inspect eMMC health and system context for a selected block device.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Reports".to_string(), "view or export sessions".to_string()],
+                detail: "Browse saved sessions and export JSON, CSV, or HTML reports.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Settings".to_string(), "paths and capabilities".to_string()],
+                detail: "Show application paths, system defaults, and capability checks.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Help".to_string(), "commands and workflow notes".to_string()],
+                detail: "Show built-in CLI usage examples and workflow notes.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Exit".to_string(), "leave emmc-lab".to_string()],
+                detail: "Return to the shell.".to_string(),
+            },
+        ];
+        let Some(choice) = select_from_menu(
+            "EMMC-LAB OPERATOR CONSOLE",
+            "Main Menu",
+            vec![
+                ("Host".to_string(), collect_system_snapshot().hostname.unwrap_or_else(|| "-".to_string())),
+                ("Profiles".to_string(), paths.profiles_dir.display().to_string()),
+                ("Sessions".to_string(), paths.sessions_dir.display().to_string()),
+            ],
+            &[
+                SelectorColumn { header: "Action", min: 16, max: 22, align_right: false },
+                SelectorColumn { header: "Purpose", min: 24, max: 42, align_right: false },
+            ],
+            &items,
+            0,
+        )? else {
+            break;
+        };
+        match choice {
+            0 => run_workload_flow(paths, &mut last_profile)?,
+            1 => diagnostics_flow(paths)?,
+            2 => health_flow(paths)?,
+            3 => reports_flow(paths)?,
+            4 => settings_flow(paths)?,
+            5 => print_help(paths),
+            6 => break,
+            _ => unreachable!(),
         }
     }
     Ok(())
@@ -92,14 +135,52 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
 
 fn run_workload_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Result<()> {
     loop {
-        println!("1. Quick Presets");
-        println!("2. Guided Custom Run");
-        println!("3. Saved Profiles");
-        println!("4. Repeat Last Run");
-        println!("5. Back");
-        match prompt_menu_default("Action [1-5]", "5", &["1", "2", "3", "4", "5"])? {
-            WizardInput::Value(value) if value == "1" => quick_presets_flow(paths, last_profile)?,
-            WizardInput::Value(value) if value == "2" => {
+        let items = vec![
+            MenuItem {
+                columns: vec!["Quick Presets".to_string(), "named common workloads".to_string()],
+                detail: "Choose from built-in file, partition, raw-device, focused logical-range, and diagnostics-oriented presets.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Guided Custom Run".to_string(), "full wizard".to_string()],
+                detail: "Open the guided wizard and build a custom profile from scratch.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Saved Profiles".to_string(), "reload existing YAML".to_string()],
+                detail: "Browse saved YAML profiles and run or edit them.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Repeat Last Run".to_string(), "rerun current session profile".to_string()],
+                detail: "Run the most recent workload profile again without re-entering fields.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Back".to_string(), "return to main menu".to_string()],
+                detail: "Leave workload management and return to the main operator console.".to_string(),
+            },
+        ];
+        let Some(choice) = select_from_menu(
+            "EMMC-LAB WORKLOADS",
+            "Run Workload",
+            vec![
+                (
+                    "Last Run".to_string(),
+                    last_profile
+                        .as_ref()
+                        .map(|profile| profile.name.clone())
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+            ],
+            &[
+                SelectorColumn { header: "Action", min: 18, max: 22, align_right: false },
+                SelectorColumn { header: "Purpose", min: 22, max: 42, align_right: false },
+            ],
+            &items,
+            0,
+        )? else {
+            return Ok(());
+        };
+        match choice {
+            0 => quick_presets_flow(paths, last_profile)?,
+            1 => {
                 if let Some(outcome) = wizard(paths, None)? {
                     if outcome.run_now {
                         let profile = outcome.profile.clone();
@@ -108,10 +189,8 @@ fn run_workload_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Re
                     }
                 }
             }
-            WizardInput::Value(value) if value == "3" => {
-                run_saved_profile_flow(paths, last_profile)?
-            }
-            WizardInput::Value(value) if value == "4" => {
+            2 => run_saved_profile_flow(paths, last_profile)?,
+            3 => {
                 let Some(profile) = last_profile.clone() else {
                     println!("No previous workload run in this session.");
                     continue;
@@ -119,7 +198,8 @@ fn run_workload_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Re
                 run_profile_session_interactive(paths, profile.clone())?;
                 *last_profile = Some(profile);
             }
-            _ => return Ok(()),
+            4 => return Ok(()),
+            _ => unreachable!(),
         }
     }
 }
@@ -803,52 +883,78 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
 fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Result<()> {
     loop {
         let categories = preset_categories();
-        println!("0. Back");
-        for (index, category) in categories.iter().enumerate() {
-            println!("{}. {}", index + 1, category_label(*category));
-        }
-        let choice = match prompt_usize_in_range(
-            &format!("Pick preset group [0-{}]", categories.len()),
-            0,
-            0,
-            categories.len(),
-        )? {
-            WizardInput::Value(value) => value,
-            WizardInput::Back | WizardInput::Cancel => return Ok(()),
-        };
-        if choice == 0 {
-            return Ok(());
-        }
-        let category = categories[choice - 1];
-        let presets = presets_in_category(category);
-        println!("0. Back");
-        for (index, preset) in presets.iter().enumerate() {
-            println!(
-                "{}. {} [{}{}]",
-                index + 1,
-                preset.name,
-                preset_scope_label(preset.target_scope),
-                if preset.destructive {
-                    ", destructive"
-                } else {
-                    ""
+        let category_items = categories
+            .iter()
+            .map(|category| MenuItem {
+                columns: vec![
+                    category_label(*category).to_string(),
+                    format!("{} presets", presets_in_category(*category).len()),
+                ],
+                detail: match category {
+                    crate::presets::PresetCategory::QuickFile => {
+                        "Safe file-backed canned runs using sample files under the app data directory."
+                    }
+                    crate::presets::PresetCategory::Partition => {
+                        "Presets that resolve against a chosen partition target."
+                    }
+                    crate::presets::PresetCategory::RawDevice => {
+                        "Presets that resolve against a whole raw block device."
+                    }
+                    crate::presets::PresetCategory::Focused => {
+                        "Focused logical-range presets such as one-sector exact-count runs."
+                    }
+                    crate::presets::PresetCategory::Diagnostics => {
+                        "Workload presets intended to correlate stress with diagnostic capture."
+                    }
                 }
-            );
-            println!("   {}", preset.description);
-        }
-        let preset_choice = match prompt_usize_in_range(
-            &format!("Pick preset [0-{}]", presets.len()),
+                .to_string(),
+            })
+            .collect::<Vec<_>>();
+        let Some(choice) = select_from_menu(
+            "EMMC-LAB QUICK PRESETS",
+            "Run Workload > Quick Presets",
+            vec![("Groups".to_string(), categories.len().to_string())],
+            &[
+                SelectorColumn { header: "Group", min: 18, max: 30, align_right: false },
+                SelectorColumn { header: "Count", min: 10, max: 12, align_right: false },
+            ],
+            &category_items,
             0,
-            0,
-            presets.len(),
-        )? {
-            WizardInput::Value(value) => value,
-            WizardInput::Back | WizardInput::Cancel => continue,
+        )? else {
+            return Ok(());
         };
-        if preset_choice == 0 {
+        let category = categories[choice];
+        let presets = presets_in_category(category);
+        let preset_items = presets
+            .iter()
+            .map(|preset| MenuItem {
+                columns: vec![
+                    preset.name.to_string(),
+                    preset_scope_label(preset.target_scope).to_string(),
+                    if preset.destructive {
+                        "destructive".to_string()
+                    } else {
+                        "safe".to_string()
+                    },
+                ],
+                detail: preset.description.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let Some(preset_choice) = select_from_menu(
+            "EMMC-LAB QUICK PRESETS",
+            &format!("Run Workload > Quick Presets > {}", category_label(category)),
+            vec![("Group".to_string(), category_label(category).to_string())],
+            &[
+                SelectorColumn { header: "Preset", min: 18, max: 30, align_right: false },
+                SelectorColumn { header: "Scope", min: 10, max: 12, align_right: false },
+                SelectorColumn { header: "Risk", min: 10, max: 12, align_right: false },
+            ],
+            &preset_items,
+            0,
+        )? else {
             continue;
-        }
-        let preset = presets[preset_choice - 1];
+        };
+        let preset = presets[preset_choice];
         let mut device = None::<DeviceInfo>;
         let mut sector = None::<u64>;
         match preset.target_scope {
@@ -910,20 +1016,51 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
         }
 
         let profile = resolve_preset(preset, paths, device.as_ref(), sector);
-        println!();
-        println!("Preset: {}", preset.name);
-        println!("Description: {}", preset.description);
-        println!("{}", profile.printable_summary());
-        println!("1. Run now");
-        println!("2. Edit before run");
-        println!("3. Save as profile");
-        println!("4. Back");
-        match prompt_menu_default("Action [1-4]", "4", &["1", "2", "3", "4"])? {
-            WizardInput::Value(value) if value == "1" => {
+        let action_items = vec![
+            MenuItem {
+                columns: vec!["Run now".to_string(), "execute immediately".to_string()],
+                detail: preset.description.to_string(),
+            },
+            MenuItem {
+                columns: vec!["Edit before run".to_string(), "open in wizard".to_string()],
+                detail: "Send the resolved preset into the wizard to adjust target, stop conditions, and options before execution.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Save as profile".to_string(), "persist YAML".to_string()],
+                detail: "Save the resolved preset as a normal editable YAML profile.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Back".to_string(), "return to presets".to_string()],
+                detail: "Return to the preset list.".to_string(),
+            },
+        ];
+        let Some(action) = select_from_menu(
+            "EMMC-LAB PRESET REVIEW",
+            &format!("Run Workload > Quick Presets > {}", preset.name),
+            vec![
+                ("Preset".to_string(), preset.name.to_string()),
+                ("Scope".to_string(), preset_scope_label(preset.target_scope).to_string()),
+                (
+                    "Risk".to_string(),
+                    if preset.destructive { "destructive" } else { "safe" }.to_string(),
+                ),
+                ("Profile".to_string(), profile.name.clone()),
+            ],
+            &[
+                SelectorColumn { header: "Action", min: 16, max: 20, align_right: false },
+                SelectorColumn { header: "Purpose", min: 18, max: 32, align_right: false },
+            ],
+            &action_items,
+            0,
+        )? else {
+            continue;
+        };
+        match action {
+            0 => {
                 run_profile_session_interactive(paths, profile.clone())?;
                 *last_profile = Some(profile);
             }
-            WizardInput::Value(value) if value == "2" => {
+            1 => {
                 if let Some(updated) = wizard(paths, Some(profile.clone()))? {
                     if updated.run_now {
                         let final_profile = updated.profile.clone();
@@ -932,7 +1069,7 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
                     }
                 }
             }
-            WizardInput::Value(value) if value == "3" => {
+            2 => {
                 let profile_path = infer_profile_path(paths, &profile.name);
                 profile.save(&profile_path)?;
                 println!("Saved profile: {}", profile_path.display());
@@ -951,33 +1088,74 @@ fn run_saved_profile_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) 
         );
         return Ok(());
     }
-    for (index, profile) in profiles.iter().enumerate() {
-        println!("{}. {}", index + 1, profile.display());
-    }
-    let choice = match prompt_usize_in_range(
-        &format!("Pick profile [0-{}]", profiles.len()),
+    let items = profiles
+        .iter()
+        .map(|profile| MenuItem {
+            columns: vec![
+                profile
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("profile")
+                    .to_string(),
+                profile.display().to_string(),
+            ],
+            detail: format!("Saved profile at {}", profile.display()),
+        })
+        .collect::<Vec<_>>();
+    let Some(choice) = select_from_menu(
+        "EMMC-LAB SAVED PROFILES",
+        "Run Workload > Saved Profiles",
+        vec![("Profiles".to_string(), profiles.len().to_string())],
+        &[
+            SelectorColumn { header: "Name", min: 16, max: 28, align_right: false },
+            SelectorColumn { header: "Path", min: 24, max: 54, align_right: false },
+        ],
+        &items,
         0,
-        0,
-        profiles.len(),
-    )? {
-        WizardInput::Value(value) => value,
-        WizardInput::Back | WizardInput::Cancel => return Ok(()),
-    };
-    if choice == 0 || choice > profiles.len() {
+    )? else {
         return Ok(());
-    }
-    let selected = &profiles[choice - 1];
+    };
+    let selected = &profiles[choice];
     let profile = Profile::load(selected)?;
-    println!("{}", profile.printable_summary());
-    println!("1. Run");
-    println!("2. Edit in wizard");
-    println!("3. Back");
-    match prompt_menu_default("Action [1-3]", "3", &["1", "2", "3"])? {
-        WizardInput::Value(value) if value == "1" => {
+    let actions = vec![
+        MenuItem {
+            columns: vec!["Run".to_string(), "execute saved profile".to_string()],
+            detail: profile.printable_summary(),
+        },
+        MenuItem {
+            columns: vec!["Edit in wizard".to_string(), "modify before run".to_string()],
+            detail: "Open the saved profile in the guided wizard.".to_string(),
+        },
+        MenuItem {
+            columns: vec!["Back".to_string(), "return to saved profiles".to_string()],
+            detail: "Leave this profile without running it.".to_string(),
+        },
+    ];
+    let Some(action) = select_from_menu(
+        "EMMC-LAB SAVED PROFILE",
+        "Run Workload > Saved Profiles",
+        vec![
+            ("Profile".to_string(), profile.name.clone()),
+            (
+                "Description".to_string(),
+                profile.description.clone().unwrap_or_else(|| "-".to_string()),
+            ),
+        ],
+        &[
+            SelectorColumn { header: "Action", min: 16, max: 20, align_right: false },
+            SelectorColumn { header: "Purpose", min: 22, max: 36, align_right: false },
+        ],
+        &actions,
+        0,
+    )? else {
+        return Ok(());
+    };
+    match action {
+        0 => {
             run_profile_session_interactive(paths, profile.clone())?;
             *last_profile = Some(profile);
         }
-        WizardInput::Value(value) if value == "2" => {
+        1 => {
             if let Some(updated) = wizard(paths, Some(profile))? {
                 if updated.run_now {
                     let profile = updated.profile.clone();
@@ -993,12 +1171,39 @@ fn run_saved_profile_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) 
 
 fn diagnostics_flow(paths: &AppPaths) -> Result<()> {
     loop {
-        println!("1. Live Monitor");
-        println!("2. Timed Capture");
-        println!("3. Deep Trace");
-        println!("4. Back");
-        match prompt_menu_default("Action [1-4]", "4", &["1", "2", "3", "4"])? {
-            WizardInput::Value(value) if value == "1" => {
+        let items = vec![
+            MenuItem {
+                columns: vec!["Live Monitor".to_string(), "managed live screen".to_string()],
+                detail: "Watch active I/O in real time with a stable screen and 1-second refresh.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Timed Capture".to_string(), "saved sampler session".to_string()],
+                detail: "Run a procfs sampler for a fixed duration and save the results as a session.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Deep Trace".to_string(), "best-effort trace path".to_string()],
+                detail: "Attempt deep tracing and explain fallback behavior when tracing support is unavailable.".to_string(),
+            },
+            MenuItem {
+                columns: vec!["Back".to_string(), "return to main menu".to_string()],
+                detail: "Leave diagnostics and return to the main menu.".to_string(),
+            },
+        ];
+        let Some(choice) = select_from_menu(
+            "EMMC-LAB DIAGNOSTICS",
+            "Diagnostics",
+            vec![("Saved Sessions".to_string(), paths.sessions_dir.display().to_string())],
+            &[
+                SelectorColumn { header: "Action", min: 16, max: 18, align_right: false },
+                SelectorColumn { header: "Purpose", min: 20, max: 34, align_right: false },
+            ],
+            &items,
+            0,
+        )? else {
+            return Ok(());
+        };
+        match choice {
+            0 => {
                 let duration = match prompt_u64_in_range(
                     "Monitor seconds [rec 0, 0=until q]",
                     0,
@@ -1016,8 +1221,8 @@ fn diagnostics_flow(paths: &AppPaths) -> Result<()> {
                 run_diag_monitor(duration, interval)?;
                 pause()?;
             }
-            WizardInput::Value(value) if value == "2" => timed_capture_flow(paths)?,
-            WizardInput::Value(value) if value == "3" => deep_trace_flow(paths)?,
+            1 => timed_capture_flow(paths)?,
+            2 => deep_trace_flow(paths)?,
             _ => return Ok(()),
         }
     }
@@ -1064,41 +1269,73 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
         println!("No sessions found");
         return Ok(());
     }
-    for (index, session) in sessions.iter().enumerate() {
-        println!("{}. {}", index + 1, session);
-    }
-    let choice = match prompt_usize_in_range(
-        &format!("Pick session [0-{}]", sessions.len()),
+    let session_items = sessions
+        .iter()
+        .map(|session| MenuItem {
+            columns: vec![session.clone()],
+            detail: format!("Saved session {}", session),
+        })
+        .collect::<Vec<_>>();
+    let Some(choice) = select_from_menu(
+        "EMMC-LAB REPORTS",
+        "Reports / Export",
+        vec![("Sessions".to_string(), sessions.len().to_string())],
+        &[SelectorColumn { header: "Session ID", min: 32, max: 48, align_right: false }],
+        &session_items,
         0,
-        0,
-        sessions.len(),
-    )? {
-        WizardInput::Value(value) => value,
-        WizardInput::Back | WizardInput::Cancel => return Ok(()),
-    };
-    if choice == 0 || choice > sessions.len() {
+    )? else {
         return Ok(());
-    }
-    let session_id = &sessions[choice - 1];
-    println!("1. View terminal summary");
-    println!("2. Export JSON");
-    println!("3. Export CSV");
-    println!("4. Export HTML");
-    println!("5. Back");
-    match prompt_menu_default("Action [1-5]", "5", &["1", "2", "3", "4", "5"])? {
-        WizardInput::Value(value) if value == "1" => {
+    };
+    let session_id = &sessions[choice];
+    let actions = vec![
+        MenuItem {
+            columns: vec!["View terminal summary".to_string(), "screen report".to_string()],
+            detail: format!("Render the saved session {} directly in the terminal.", session_id),
+        },
+        MenuItem {
+            columns: vec!["Export JSON".to_string(), "machine-readable".to_string()],
+            detail: "Write a JSON export under the exports directory.".to_string(),
+        },
+        MenuItem {
+            columns: vec!["Export CSV".to_string(), "spreadsheet-friendly".to_string()],
+            detail: "Write CSV exports for summary, intervals, and processes where present.".to_string(),
+        },
+        MenuItem {
+            columns: vec!["Export HTML".to_string(), "shareable report".to_string()],
+            detail: "Write an HTML report under the exports directory.".to_string(),
+        },
+        MenuItem {
+            columns: vec!["Back".to_string(), "return to sessions".to_string()],
+            detail: "Leave this session without viewing or exporting it.".to_string(),
+        },
+    ];
+    let Some(action) = select_from_menu(
+        "EMMC-LAB REPORT ACTIONS",
+        "Reports / Export",
+        vec![("Session".to_string(), session_id.clone())],
+        &[
+            SelectorColumn { header: "Action", min: 20, max: 24, align_right: false },
+            SelectorColumn { header: "Purpose", min: 18, max: 32, align_right: false },
+        ],
+        &actions,
+        0,
+    )? else {
+        return Ok(());
+    };
+    match action {
+        0 => {
             run_report(paths, session_id)?;
             pause()?;
         }
-        WizardInput::Value(value) if value == "2" => {
+        1 => {
             run_export(paths, session_id, ExportFormat::Json)?;
             pause()?;
         }
-        WizardInput::Value(value) if value == "3" => {
+        2 => {
             run_export(paths, session_id, ExportFormat::Csv)?;
             pause()?;
         }
-        WizardInput::Value(value) if value == "4" => {
+        3 => {
             run_export(paths, session_id, ExportFormat::Html)?;
             pause()?;
         }
@@ -1306,47 +1543,54 @@ fn choose_file_target_path() -> Result<WizardInput<String>> {
     }
     options.dedup();
 
-    loop {
-        println!("0. Back");
-        for (index, option) in options.iter().enumerate() {
-            let suffix = if index == 0 { " [default]" } else { "" };
+    let mut items = options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
             let size = fs::metadata(option)
                 .ok()
                 .filter(|meta| meta.is_file())
-                .map(|meta| format!(" [{}]", format_bytes(meta.len())))
-                .unwrap_or_default();
-            println!("{}. {}{}{}", index + 1, option.display(), size, suffix);
-        }
-        println!("{}. Enter path manually", options.len() + 1);
-        match prompt_string_default(&format!("Pick file [0-{}]", options.len() + 1), Some("1"))? {
-            WizardInput::Value(value) => {
-                let Ok(choice) = value.parse::<usize>() else {
-                    println!("Invalid choice");
-                    continue;
-                };
-                if choice == 0 {
-                    return Ok(WizardInput::Back);
-                }
-                if choice <= options.len() {
-                    return Ok(WizardInput::Value(
-                        options[choice - 1].display().to_string(),
-                    ));
-                }
-                if choice == options.len() + 1 {
-                    match prompt_string_default(
-                        "File path",
-                        Some(&options[0].display().to_string()),
-                    )? {
-                        WizardInput::Value(value) => return Ok(WizardInput::Value(value)),
-                        WizardInput::Back => continue,
-                        WizardInput::Cancel => return Ok(WizardInput::Cancel),
-                    }
-                }
-                println!("Invalid choice");
+                .map(|meta| format_bytes(meta.len()))
+                .unwrap_or_else(|| "-".to_string());
+            MenuItem {
+                columns: vec![
+                    option.display().to_string(),
+                    size,
+                    if index == 0 { "default".to_string() } else { "-".to_string() },
+                ],
+                detail: format!("Use {} as the file-backed workload target.", option.display()),
             }
-            WizardInput::Back => return Ok(WizardInput::Back),
-            WizardInput::Cancel => return Ok(WizardInput::Cancel),
-        }
+        })
+        .collect::<Vec<_>>();
+    items.push(MenuItem {
+        columns: vec![
+            "Enter path manually".to_string(),
+            "-".to_string(),
+            "-".to_string(),
+        ],
+        detail: "Type a custom file path.".to_string(),
+    });
+    let Some(choice) = select_from_menu(
+        "EMMC-LAB FILE TARGET",
+        "Wizard > Select File Target",
+        vec![("Suggestions".to_string(), options.len().to_string())],
+        &[
+            SelectorColumn { header: "Path", min: 24, max: 48, align_right: false },
+            SelectorColumn { header: "Size", min: 10, max: 18, align_right: false },
+            SelectorColumn { header: "Hint", min: 8, max: 10, align_right: false },
+        ],
+        &items,
+        0,
+    )? else {
+        return Ok(WizardInput::Back);
+    };
+    if choice < options.len() {
+        return Ok(WizardInput::Value(options[choice].display().to_string()));
+    }
+    match prompt_string_default("File path", Some(&options[0].display().to_string()))? {
+        WizardInput::Value(value) => Ok(WizardInput::Value(value)),
+        WizardInput::Back => Ok(WizardInput::Back),
+        WizardInput::Cancel => Ok(WizardInput::Cancel),
     }
 }
 
@@ -1364,61 +1608,86 @@ fn choose_device_path(
     let mut show_all = primary_devices.is_empty();
     loop {
         let visible_devices = if show_all { &devices } else { &primary_devices };
-        println!("0. Back");
-        for (index, device) in visible_devices.iter().enumerate() {
-            println!("{}. {}", index + 1, device_selection_label(device));
-        }
-        let mut next_index = visible_devices.len() + 1;
+        let mut items = visible_devices
+            .iter()
+            .map(|device| MenuItem {
+                columns: vec![
+                    device.path.display().to_string(),
+                    if device.is_partition {
+                        "partition".to_string()
+                    } else {
+                        "device".to_string()
+                    },
+                    device
+                        .size_bytes
+                        .map(format_bytes)
+                        .unwrap_or_else(|| "-".to_string()),
+                ],
+                detail: device_selection_label(device),
+            })
+            .collect::<Vec<_>>();
         let show_all_index = if !show_all && primary_devices.len() < devices.len() {
-            println!("{}. Show all devices", next_index);
-            let idx = next_index;
-            next_index += 1;
-            Some(idx)
+            items.push(MenuItem {
+                columns: vec![
+                    "Show all devices".to_string(),
+                    "action".to_string(),
+                    "-".to_string(),
+                ],
+                detail: "Expand the device list to include loop and ram devices.".to_string(),
+            });
+            Some(items.len() - 1)
         } else {
             None
         };
-        let manual_index = next_index;
-        if allow_manual {
-            println!("{}. Enter path manually", manual_index);
+        let manual_index = if allow_manual {
+            items.push(MenuItem {
+                columns: vec![
+                    "Enter path manually".to_string(),
+                    "action".to_string(),
+                    "-".to_string(),
+                ],
+                detail: "Type a custom device path.".to_string(),
+            });
+            Some(items.len() - 1)
+        } else {
+            None
+        };
+        let Some(choice) = select_from_menu(
+            "EMMC-LAB DEVICE PICKER",
+            title,
+            vec![
+                (
+                    "Visible".to_string(),
+                    visible_devices.len().to_string(),
+                ),
+                (
+                    "Mode".to_string(),
+                    if show_all { "all devices" } else { "preferred only" }.to_string(),
+                ),
+            ],
+            &[
+                SelectorColumn { header: "Path", min: 18, max: 28, align_right: false },
+                SelectorColumn { header: "Kind", min: 10, max: 12, align_right: false },
+                SelectorColumn { header: "Size", min: 10, max: 18, align_right: false },
+            ],
+            &items,
+            0,
+        )? else {
+            return Ok(None);
+        };
+        if choice < visible_devices.len() {
+            return Ok(Some(visible_devices[choice].path.clone()));
         }
-        match prompt_string_default(
-            &format!(
-                "{} [0-{}]",
-                title,
-                if allow_manual {
-                    manual_index
-                } else {
-                    visible_devices.len()
-                }
-            ),
-            Some("1"),
-        )? {
-            WizardInput::Value(value) => {
-                let Ok(choice) = value.parse::<usize>() else {
-                    println!("Invalid choice");
-                    continue;
-                };
-                if choice == 0 {
-                    return Ok(None);
-                }
-                if choice <= visible_devices.len() {
-                    return Ok(Some(visible_devices[choice - 1].path.clone()));
-                }
-                if show_all_index == Some(choice) {
-                    show_all = true;
-                    continue;
-                }
-                if allow_manual && choice == manual_index {
-                    match prompt_string_default("Device path", None)? {
-                        WizardInput::Value(value) => return Ok(Some(PathBuf::from(value))),
-                        WizardInput::Back => continue,
-                        WizardInput::Cancel => return Ok(None),
-                    }
-                }
-                println!("Invalid choice");
+        if show_all_index == Some(choice) {
+            show_all = true;
+            continue;
+        }
+        if manual_index == Some(choice) {
+            match prompt_string_default("Device path", None)? {
+                WizardInput::Value(value) => return Ok(Some(PathBuf::from(value))),
+                WizardInput::Back => continue,
+                WizardInput::Cancel => return Ok(None),
             }
-            WizardInput::Back => return Ok(None),
-            WizardInput::Cancel => return Ok(None),
         }
     }
 }
@@ -1909,6 +2178,54 @@ fn parse_yes_no(value: &str) -> Result<bool> {
     }
 }
 
+fn select_from_menu(
+    title: &str,
+    breadcrumb: &str,
+    summary_rows: Vec<(String, String)>,
+    columns: &[SelectorColumn<'_>],
+    items: &[MenuItem],
+    default: usize,
+) -> Result<Option<usize>> {
+    if items.is_empty() {
+        return Ok(None);
+    }
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1
+        || unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1
+    {
+        bail!("interactive selector requires a terminal");
+    }
+    let _terminal = RawTerminalGuard::new()?;
+    let mut selected = default.min(items.len().saturating_sub(1));
+    loop {
+        let rows = items
+            .iter()
+            .map(|item| SelectorRow {
+                cells: item.columns.clone(),
+                detail: item.detail.clone(),
+            })
+            .collect::<Vec<_>>();
+        redraw_managed_screen(&render_selector_screen(
+            title,
+            breadcrumb,
+            &summary_rows,
+            columns,
+            &rows,
+            selected,
+            "Up/Down Move  Enter Select  Esc Back  Q Quit",
+        ))?;
+        match read_menu_key()? {
+            MenuKey::Up => {
+                selected = selected.saturating_sub(1);
+            }
+            MenuKey::Down => {
+                selected = (selected + 1).min(items.len().saturating_sub(1));
+            }
+            MenuKey::Enter => return Ok(Some(selected)),
+            MenuKey::Escape | MenuKey::Quit => return Ok(None),
+        }
+    }
+}
+
 fn pause() -> Result<()> {
     println!("Press Enter to continue...");
     let mut input = String::new();
@@ -1963,11 +2280,11 @@ impl Drop for RawTerminalGuard {
 }
 
 fn redraw_live_monitor(report: &DiagnosticReport, interval_ms: u64) -> Result<()> {
-    write!(
-        io::stdout(),
-        "\u{1b}[H\u{1b}[J{}",
-        render_live_monitor(report, interval_ms)
-    )?;
+    redraw_managed_screen(&render_live_monitor(report, interval_ms))
+}
+
+fn redraw_managed_screen(content: &str) -> Result<()> {
+    write!(io::stdout(), "\u{1b}[H\u{1b}[J{}", content)?;
     io::stdout().flush()?;
     Ok(())
 }
@@ -1992,6 +2309,39 @@ fn poll_keypress_until(timeout: Duration) -> Result<Option<u8>> {
         Ok(Some(byte[0]))
     } else {
         Ok(None)
+    }
+}
+
+fn read_menu_key() -> Result<MenuKey> {
+    loop {
+        let Some(byte) = poll_keypress_until(Duration::from_secs(60))? else {
+            continue;
+        };
+        return match byte {
+            b'\r' | b'\n' => Ok(MenuKey::Enter),
+            b'k' | b'K' => Ok(MenuKey::Up),
+            b'j' | b'J' => Ok(MenuKey::Down),
+            b'q' | b'Q' | 3 => Ok(MenuKey::Quit),
+            27 => parse_escape_sequence(),
+            _ => continue,
+        };
+    }
+}
+
+fn parse_escape_sequence() -> Result<MenuKey> {
+    let Some(next) = poll_keypress_until(Duration::from_millis(20))? else {
+        return Ok(MenuKey::Escape);
+    };
+    if next != b'[' {
+        return Ok(MenuKey::Escape);
+    }
+    let Some(code) = poll_keypress_until(Duration::from_millis(20))? else {
+        return Ok(MenuKey::Escape);
+    };
+    match code {
+        b'A' => Ok(MenuKey::Up),
+        b'B' => Ok(MenuKey::Down),
+        _ => Ok(MenuKey::Escape),
     }
 }
 
