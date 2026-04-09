@@ -14,7 +14,7 @@
 Requirements:
 
 - Rust toolchain (`cargo`, `rustc`)
-- Linux on Raspberry Pi OS / Debian Bookworm
+- Current validated runtime: Linux (Raspberry Pi OS / Debian Bookworm)
 
 Build:
 
@@ -22,6 +22,10 @@ Build:
 cargo build --release
 sudo install -m 0755 target/release/emmc-lab /usr/local/bin/emmc-lab
 ```
+
+## Cross-Platform Status
+
+`emmc-lab` is implemented with Linux/Unix-specific facilities today (`/proc`, `/sys`, `std::os::unix`, and low-level `libc` I/O). For a concrete implementation path for Windows/macOS support, see [docs/CROSS_PLATFORM.md](CROSS_PLATFORM.md).
 
 ## Raspberry Pi Self-Deploy Install
 

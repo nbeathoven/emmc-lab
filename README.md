@@ -219,7 +219,7 @@ emmc-lab
 
 Requirements:
 
-- Linux on Raspberry Pi OS / Debian Bookworm
+- Current validated runtime: Linux (Raspberry Pi OS / Debian Bookworm)
 - Rust toolchain (`cargo`, `rustc`) unless using the installer
 
 Build manually:
@@ -234,6 +234,30 @@ Optional embedded SQLite build:
 ```bash
 cargo build --release --features sqlite
 ```
+
+### Cross-platform build notes (Linux, macOS, Windows)
+
+`emmc-lab` currently targets Linux-first runtime behavior. The codebase contains Linux/Unix APIs such as `/proc`, `/sys`, and `std::os::unix` usage. See [`docs/CROSS_PLATFORM.md`](docs/CROSS_PLATFORM.md) for a concrete refactor plan and compatibility matrix.
+
+If you only need to build and test the portable core portions in CI, use this pattern:
+
+```bash
+# Linux
+cargo check --workspace
+
+# Windows (PowerShell)
+cargo check --workspace
+
+# macOS
+cargo check --workspace
+```
+
+To make runtime behavior cross-platform, split platform logic into adapters and provide non-Linux fallbacks for:
+
+- diagnostics sampling (`/proc`)
+- block-device discovery (`/sys/class/block`)
+- terminal raw-mode and TTY polling
+- direct-IO flags and low-level file APIs
 
 ## Project Layout
 
