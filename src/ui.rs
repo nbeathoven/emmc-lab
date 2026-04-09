@@ -479,6 +479,14 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 "Unattrib Write".to_string(),
                 fmt_bytes(diag.unattributed_storage_write_bytes),
             ),
+            (
+                "Proc>Dev Read".to_string(),
+                fmt_bytes(diag.process_excess_storage_read_bytes),
+            ),
+            (
+                "Proc>Dev Write".to_string(),
+                fmt_bytes(diag.process_excess_storage_write_bytes),
+            ),
         ];
         out.push_str(&ui.pair(session_panel, ui.kv_table("Diagnostics", &diag_rows)));
     } else {
@@ -531,6 +539,14 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 (
                     "Unattrib Write".to_string(),
                     fmt_bytes(diag.unattributed_storage_write_bytes),
+                ),
+                (
+                    "Proc>Dev Read".to_string(),
+                    fmt_bytes(diag.process_excess_storage_read_bytes),
+                ),
+                (
+                    "Proc>Dev Write".to_string(),
+                    fmt_bytes(diag.process_excess_storage_write_bytes),
                 ),
             ];
             out.push_str(&ui.kv_table("Diagnostics", &diag_rows));
@@ -1060,6 +1076,14 @@ pub fn render_live_monitor(
         (
             "Unattrib W".to_string(),
             fmt_bytes(report.unattributed_storage_write_bytes),
+        ),
+        (
+            "Proc>Dev R".to_string(),
+            fmt_bytes(report.process_excess_storage_read_bytes),
+        ),
+        (
+            "Proc>Dev W".to_string(),
+            fmt_bytes(report.process_excess_storage_write_bytes),
         ),
     ];
     out.push_str(&ui.pair(

@@ -266,6 +266,10 @@ fn render_html(record: &SessionRecord) -> String {
             "<tr><th>Unattributed Device Bytes</th><td>read={} write={}</td></tr>",
             diag.unattributed_storage_read_bytes, diag.unattributed_storage_write_bytes
         ));
+        html.push_str(&format!(
+            "<tr><th>Process Bytes Above Device Totals</th><td>read={} write={}</td></tr>",
+            diag.process_excess_storage_read_bytes, diag.process_excess_storage_write_bytes
+        ));
         html.push_str("</table>");
         html.push_str("<table><tr><th>PID</th><th>User</th><th>Command</th><th>Logical Read B/s</th><th>Logical Write B/s</th><th>Storage Read B/s</th><th>Storage Write B/s</th><th>Hottest File</th><th>Hottest Directory</th></tr>");
         for p in diag.top_processes.iter().take(15) {

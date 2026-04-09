@@ -147,6 +147,10 @@ pub struct DiagnosticReport {
     #[serde(default)]
     pub unattributed_storage_write_bytes: u64,
     #[serde(default)]
+    pub process_excess_storage_read_bytes: u64,
+    #[serde(default)]
+    pub process_excess_storage_write_bytes: u64,
+    #[serde(default)]
     pub unresolved_path_count: u64,
     #[serde(default)]
     pub dropped_event_count: u64,
@@ -323,6 +327,8 @@ fn run_live_sampler_internal(
             device_storage_write_bytes: 0,
             unattributed_storage_read_bytes: 0,
             unattributed_storage_write_bytes: 0,
+            process_excess_storage_read_bytes: 0,
+            process_excess_storage_write_bytes: 0,
             unresolved_path_count: 0,
             dropped_event_count: 0,
             attribution_note: "procfs is unavailable on this host, so live sampler attribution could not be collected.".to_string(),
@@ -584,6 +590,10 @@ fn build_sampler_report(
         .saturating_sub(observed_storage_read_bytes);
     let unattributed_storage_write_bytes = device_storage_write_bytes
         .saturating_sub(observed_storage_write_bytes);
+    let process_excess_storage_read_bytes = observed_storage_read_bytes
+        .saturating_sub(device_storage_read_bytes);
+    let process_excess_storage_write_bytes = observed_storage_write_bytes
+        .saturating_sub(device_storage_write_bytes);
     let mut restricted = restricted_processes.values().cloned().collect::<Vec<_>>();
     restricted.sort_by(|a, b| a.command.cmp(&b.command).then_with(|| a.pid.cmp(&b.pid)));
     let kernel_process_count = restricted
@@ -613,6 +623,8 @@ fn build_sampler_report(
         device_storage_write_bytes,
         unattributed_storage_read_bytes,
         unattributed_storage_write_bytes,
+        process_excess_storage_read_bytes,
+        process_excess_storage_write_bytes,
         unresolved_path_count,
         dropped_event_count: 0,
         attribution_note: "Logical syscall bytes (rchar/wchar) and storage-layer bytes (read_bytes/write_bytes) are reported separately. File and directory attribution in sampler mode is best-effort based on observed open descriptors, fdinfo metadata, and procfs deltas; it is not exact per-file kernel attribution. Processes owned by other users may require root to read /proc/<pid>/io, and device-level bytes may exceed process-attributed bytes when kernel writeback, journaling, or restricted processes are active.".to_string(),
@@ -655,6 +667,8 @@ pub fn run_deep_trace(
             device_storage_write_bytes: 0,
             unattributed_storage_read_bytes: 0,
             unattributed_storage_write_bytes: 0,
+            process_excess_storage_read_bytes: 0,
+            process_excess_storage_write_bytes: 0,
             unresolved_path_count: 0,
             dropped_event_count: 0,
             attribution_note: "deep trace requires root and kernel tracing support; when unavailable, the application can fall back to sampler mode".to_string(),
