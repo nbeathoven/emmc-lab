@@ -2,6 +2,55 @@
 
 This document describes how to move `emmc-lab` from Linux-first to true cross-platform support while preserving current behavior on Raspberry Pi Linux.
 
+## Publisher Rollout (How to Apply This Plan)
+
+If you publish binaries/releases, apply this plan in phases so users always get a working Linux build while other platforms are added safely.
+
+### Phase 0: Baseline and branch setup
+
+1. Create a feature branch for platform work.
+2. Add a CI matrix with Linux/macOS/Windows `cargo check --workspace`.
+3. Keep Linux integration tests required; allow non-Linux jobs to run portable checks first.
+
+### Phase 1: Internal adapter extraction (no user-facing behavior change)
+
+1. Introduce `platform/` modules and traits (see "Recommended Refactor").
+2. Move existing Linux logic into the Linux adapter.
+3. Keep command output unchanged on Linux.
+
+### Phase 2: Non-Linux compile support
+
+1. Add macOS/Windows adapter stubs returning capability-disabled results for Linux-only features.
+2. Gate raw-device paths on adapter capability checks.
+3. Ensure non-Linux commands fail gracefully only when a Linux-only feature is requested.
+
+### Phase 3: Runtime hardening on macOS/Windows
+
+1. Enable file-based workload runs end-to-end on both platforms.
+2. Add platform-specific terminal handling where needed.
+3. Add integration tests for file-mode profiles on each OS runner.
+
+### Phase 4: Release and communication
+
+1. Publish release notes with a support matrix (Linux full; macOS/Windows core).
+2. Update docs with feature availability by platform.
+3. Provide platform-specific install artifacts:
+   - Linux tarball/package
+   - Windows zip (`emmc-lab.exe`)
+   - macOS tarball/pkg
+
+### Suggested publisher commands
+
+```bash
+# verify formatting and compile
+cargo fmt --all -- --check
+cargo check --workspace
+cargo test --workspace
+
+# produce release binary
+cargo build --release
+```
+
 ## Current State
 
 The project currently relies on Linux/Unix-specific interfaces in several places:

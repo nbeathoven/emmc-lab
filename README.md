@@ -237,7 +237,7 @@ cargo build --release --features sqlite
 
 ### Cross-platform build notes (Linux, macOS, Windows)
 
-`emmc-lab` currently targets Linux-first runtime behavior. The codebase contains Linux/Unix APIs such as `/proc`, `/sys`, and `std::os::unix` usage. See [`docs/CROSS_PLATFORM.md`](docs/CROSS_PLATFORM.md) for a concrete refactor plan and compatibility matrix.
+`emmc-lab` currently targets Linux-first runtime behavior. The codebase contains Linux/Unix APIs such as `/proc`, `/sys`, and `std::os::unix` usage. See [`docs/CROSS_PLATFORM.md`](docs/CROSS_PLATFORM.md) for a concrete refactor plan, compatibility matrix, and publisher rollout checklist.
 
 If you only need to build and test the portable core portions in CI, use this pattern:
 
