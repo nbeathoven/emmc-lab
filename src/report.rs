@@ -107,10 +107,10 @@ fn export_csv(paths: &AppPaths, record: &SessionRecord) -> Result<Vec<PathBuf>> 
         let process_path = paths
             .exports_dir
             .join(format!("{}_processes.csv", record.session_id));
-        let mut process_csv = String::from("pid,user,command,exe_path,cwd,logical_read_bytes_per_sec,logical_write_bytes_per_sec,storage_read_bytes_per_sec,storage_write_bytes_per_sec,read_syscalls_per_sec,write_syscalls_per_sec,open_file_count,hottest_file,hottest_directory,observed_share_percent\n");
+        let mut process_csv = String::from("pid,user,command,exe_path,cwd,logical_read_bytes_per_sec,logical_write_bytes_per_sec,storage_read_bytes_per_sec,storage_write_bytes_per_sec,read_syscalls_per_sec,write_syscalls_per_sec,open_file_count,readable_fd_count,writable_fd_count,hottest_file,hottest_directory,observed_share_percent\n");
         for p in &diag.top_processes {
             process_csv.push_str(&format!(
-                "{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{}\n",
+                "{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{},{}\n",
                 p.pid,
                 csv_escape(&p.user),
                 csv_escape(&p.command),
@@ -123,6 +123,8 @@ fn export_csv(paths: &AppPaths, record: &SessionRecord) -> Result<Vec<PathBuf>> 
                 p.read_syscalls_per_sec,
                 p.write_syscalls_per_sec,
                 p.open_file_count,
+                p.readable_fd_count,
+                p.writable_fd_count,
                 csv_escape(&p.hottest_file),
                 csv_escape(&p.hottest_directory),
                 p.observed_share_percent
@@ -130,6 +132,54 @@ fn export_csv(paths: &AppPaths, record: &SessionRecord) -> Result<Vec<PathBuf>> 
         }
         fs::write(&process_path, process_csv)?;
         paths_out.push(process_path);
+
+        let file_path = paths
+            .exports_dir
+            .join(format!("{}_files.csv", record.session_id));
+        let mut file_csv = String::from("file_path,last_pid_touching_file,readers_count,writers_count,read_ops,write_ops,read_bytes,write_bytes,last_seen_offset_bytes,last_seen_open_flags,last_seen_mount_id,last_access_timestamp\n");
+        for file in &diag.top_files {
+            file_csv.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                csv_escape(&file.file_path),
+                file.last_pid_touching_file,
+                file.readers_count,
+                file.writers_count,
+                file.read_ops,
+                file.write_ops,
+                file.read_bytes,
+                file.write_bytes,
+                file.last_seen_offset_bytes
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                csv_escape(&file.last_seen_open_flags),
+                file.last_seen_mount_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                csv_escape(&file.last_access_timestamp),
+            ));
+        }
+        fs::write(&file_path, file_csv)?;
+        paths_out.push(file_path);
+
+        let device_path = paths
+            .exports_dir
+            .join(format!("{}_devices.csv", record.session_id));
+        let mut device_csv = String::from("device,reads_completed,writes_completed,sectors_read,sectors_written,time_spent_reading_ms,time_spent_writing_ms,current_ios_in_progress\n");
+        for device in &diag.device_totals {
+            device_csv.push_str(&format!(
+                "{},{},{},{},{},{},{},{}\n",
+                csv_escape(&device.device),
+                device.reads_completed,
+                device.writes_completed,
+                device.sectors_read,
+                device.sectors_written,
+                device.time_spent_reading_ms,
+                device.time_spent_writing_ms,
+                device.current_ios_in_progress,
+            ));
+        }
+        fs::write(&device_path, device_csv)?;
+        paths_out.push(device_path);
     }
 
     Ok(paths_out)
@@ -203,6 +253,20 @@ fn render_html(record: &SessionRecord) -> String {
     if let Some(diag) = &record.diagnostics {
         html.push_str("<h2>Diagnostics</h2>");
         html.push_str(&format!("<p>{}</p>", diag.attribution_note));
+        html.push_str("<table>");
+        html.push_str(&format!(
+            "<tr><th>Observed Process Storage</th><td>read={} write={}</td></tr>",
+            diag.observed_storage_read_bytes, diag.observed_storage_write_bytes
+        ));
+        html.push_str(&format!(
+            "<tr><th>Device Storage Totals</th><td>read={} write={}</td></tr>",
+            diag.device_storage_read_bytes, diag.device_storage_write_bytes
+        ));
+        html.push_str(&format!(
+            "<tr><th>Unattributed Device Bytes</th><td>read={} write={}</td></tr>",
+            diag.unattributed_storage_read_bytes, diag.unattributed_storage_write_bytes
+        ));
+        html.push_str("</table>");
         html.push_str("<table><tr><th>PID</th><th>User</th><th>Command</th><th>Logical Read B/s</th><th>Logical Write B/s</th><th>Storage Read B/s</th><th>Storage Write B/s</th><th>Hottest File</th><th>Hottest Directory</th></tr>");
         for p in diag.top_processes.iter().take(15) {
             html.push_str(&format!(
@@ -219,6 +283,18 @@ fn render_html(record: &SessionRecord) -> String {
             ));
         }
         html.push_str("</table>");
+        if !diag.kernel_activity.is_empty() {
+            html.push_str("<table><tr><th>Kernel Class</th><th>Count</th><th>Sample Commands</th></tr>");
+            for bucket in &diag.kernel_activity {
+                html.push_str(&format!(
+                    "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    escape_html(&bucket.category),
+                    bucket.process_count,
+                    escape_html(&bucket.sample_commands.join(", "))
+                ));
+            }
+            html.push_str("</table>");
+        }
     }
 
     if let Some(before) = &record.health_before {

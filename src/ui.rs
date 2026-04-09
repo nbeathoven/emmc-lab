@@ -471,6 +471,14 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 "Kernel-like".to_string(),
                 diag.kernel_process_count.to_string(),
             ),
+            (
+                "Unattrib Read".to_string(),
+                fmt_bytes(diag.unattributed_storage_read_bytes),
+            ),
+            (
+                "Unattrib Write".to_string(),
+                fmt_bytes(diag.unattributed_storage_write_bytes),
+            ),
         ];
         out.push_str(&ui.pair(session_panel, ui.kv_table("Diagnostics", &diag_rows)));
     } else {
@@ -515,6 +523,14 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 (
                     "Kernel-like".to_string(),
                     diag.kernel_process_count.to_string(),
+                ),
+                (
+                    "Unattrib Read".to_string(),
+                    fmt_bytes(diag.unattributed_storage_read_bytes),
+                ),
+                (
+                    "Unattrib Write".to_string(),
+                    fmt_bytes(diag.unattributed_storage_write_bytes),
                 ),
             ];
             out.push_str(&ui.kv_table("Diagnostics", &diag_rows));
@@ -665,10 +681,12 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     file.last_pid_touching_file.to_string(),
                     file.readers_count.to_string(),
                     file.writers_count.to_string(),
-                    file.read_ops.to_string(),
-                    file.write_ops.to_string(),
                     fmt_bytes(file.read_bytes),
                     fmt_bytes(file.write_bytes),
+                    file.last_seen_offset_bytes
+                        .map(fmt_bytes)
+                        .unwrap_or_else(|| "-".to_string()),
+                    file.last_seen_open_flags.clone(),
                 ]
             })
             .collect::<Vec<_>>();
@@ -701,18 +719,6 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                         align: Align::Right,
                     },
                     Column {
-                        header: "Read Ops",
-                        min: 8,
-                        max: 9,
-                        align: Align::Right,
-                    },
-                    Column {
-                        header: "Write Ops",
-                        min: 9,
-                        max: 10,
-                        align: Align::Right,
-                    },
-                    Column {
                         header: "Read Bytes",
                         min: 10,
                         max: 11,
@@ -723,6 +729,18 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                         min: 10,
                         max: 11,
                         align: Align::Right,
+                    },
+                    Column {
+                        header: "FD Pos",
+                        min: 8,
+                        max: 11,
+                        align: Align::Right,
+                    },
+                    Column {
+                        header: "Flags",
+                        min: 8,
+                        max: 16,
+                        align: Align::Left,
                     },
                 ],
                 &file_rows,
@@ -1035,6 +1053,14 @@ pub fn render_live_monitor(
             "Kernel".to_string(),
             report.kernel_process_count.to_string(),
         ),
+        (
+            "Unattrib R".to_string(),
+            fmt_bytes(report.unattributed_storage_read_bytes),
+        ),
+        (
+            "Unattrib W".to_string(),
+            fmt_bytes(report.unattributed_storage_write_bytes),
+        ),
     ];
     out.push_str(&ui.pair(
         ui.kv_table("Monitor", &overview_rows),
@@ -1235,11 +1261,54 @@ pub fn render_live_monitor(
             &restricted_rows,
         )
     };
+    let kernel_rows = report
+        .kernel_activity
+        .iter()
+        .take(if medium { 3 } else { 6 })
+        .map(|bucket| {
+            vec![
+                bucket.category.clone(),
+                bucket.process_count.to_string(),
+                bucket.sample_commands.join(", "),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let kernel_panel = if kernel_rows.is_empty() {
+        String::new()
+    } else {
+        ui.table(
+            "Kernel / Writeback",
+            &[
+                Column {
+                    header: "Class",
+                    min: 8,
+                    max: 10,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Count",
+                    min: 5,
+                    max: 7,
+                    align: Align::Right,
+                },
+                Column {
+                    header: "Sample Commands",
+                    min: 18,
+                    max: 36,
+                    align: Align::Left,
+                },
+            ],
+            &kernel_rows,
+        )
+    };
     if !process_panel.is_empty() || !device_panel.is_empty() {
         out.push_str(&ui.pair(process_panel, device_panel));
     }
     if !restricted_panel.is_empty() {
         out.push_str(&restricted_panel);
+    }
+    if !kernel_panel.is_empty() {
+        out.push_str(&kernel_panel);
     }
 
     if !medium {
@@ -1301,6 +1370,10 @@ pub fn render_live_monitor(
                     file.last_pid_touching_file.to_string(),
                     fmt_bytes(file.read_bytes),
                     fmt_bytes(file.write_bytes),
+                    file.last_seen_offset_bytes
+                        .map(fmt_bytes)
+                        .unwrap_or_else(|| "-".to_string()),
+                    file.last_seen_open_flags.clone(),
                 ]
             })
             .collect::<Vec<_>>();
@@ -1331,6 +1404,18 @@ pub fn render_live_monitor(
                         min: 10,
                         max: 11,
                         align: Align::Right,
+                    },
+                    Column {
+                        header: "FD Pos",
+                        min: 8,
+                        max: 11,
+                        align: Align::Right,
+                    },
+                    Column {
+                        header: "Flags",
+                        min: 8,
+                        max: 14,
+                        align: Align::Left,
                     },
                 ],
                 &file_rows,

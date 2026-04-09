@@ -1,4 +1,6 @@
-use crate::system::{deep_trace_available, diskstats_map, read_link_string, resolve_uid_to_user};
+use crate::system::{
+    deep_trace_available, diskstats_map, list_devices, read_link_string, resolve_uid_to_user,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -43,6 +45,8 @@ pub struct ProcessSummary {
     pub write_syscalls_per_sec: f64,
     pub sync_count: u64,
     pub open_file_count: usize,
+    pub readable_fd_count: usize,
+    pub writable_fd_count: usize,
     pub hottest_file: String,
     pub hottest_directory: String,
     pub observed_share_percent: f64,
@@ -60,6 +64,9 @@ pub struct FileSummary {
     pub read_bytes: u64,
     pub write_bytes: u64,
     pub fsync_count: u64,
+    pub last_seen_offset_bytes: Option<u64>,
+    pub last_seen_open_flags: String,
+    pub last_seen_mount_id: Option<u64>,
     pub last_access_timestamp: String,
 }
 
@@ -96,6 +103,14 @@ pub struct RestrictedProcessSummary {
     pub reason: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct KernelActivityBucket {
+    pub category: String,
+    pub process_count: u64,
+    pub sample_commands: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticReport {
     pub mode: DiagnosticMode,
@@ -117,6 +132,20 @@ pub struct DiagnosticReport {
     pub kernel_process_count: u64,
     #[serde(default)]
     pub restricted_processes: Vec<RestrictedProcessSummary>,
+    #[serde(default)]
+    pub kernel_activity: Vec<KernelActivityBucket>,
+    #[serde(default)]
+    pub observed_storage_read_bytes: u64,
+    #[serde(default)]
+    pub observed_storage_write_bytes: u64,
+    #[serde(default)]
+    pub device_storage_read_bytes: u64,
+    #[serde(default)]
+    pub device_storage_write_bytes: u64,
+    #[serde(default)]
+    pub unattributed_storage_read_bytes: u64,
+    #[serde(default)]
+    pub unattributed_storage_write_bytes: u64,
     #[serde(default)]
     pub unresolved_path_count: u64,
     #[serde(default)]
@@ -141,7 +170,7 @@ struct ProcIo {
     read_bytes: u64,
     write_bytes: u64,
     cancelled_write_bytes: u64,
-    open_files: Vec<String>,
+    open_files: Vec<OpenFileInfo>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -160,6 +189,8 @@ struct ProcAgg {
     read_syscalls: u64,
     write_syscalls: u64,
     open_file_count: usize,
+    readable_fd_count: usize,
+    writable_fd_count: usize,
     file_hits: HashMap<String, u64>,
     dir_hits: HashMap<String, u64>,
 }
@@ -170,6 +201,14 @@ struct ProcIdentity {
     ppid: i32,
     uid: u32,
     command: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct OpenFileInfo {
+    path: String,
+    position: Option<u64>,
+    flags: Option<i32>,
+    mount_id: Option<u64>,
 }
 
 #[derive(Default)]
@@ -277,6 +316,13 @@ fn run_live_sampler_internal(
             restricted_process_count: 0,
             kernel_process_count: 0,
             restricted_processes: vec![],
+            kernel_activity: vec![],
+            observed_storage_read_bytes: 0,
+            observed_storage_write_bytes: 0,
+            device_storage_read_bytes: 0,
+            device_storage_write_bytes: 0,
+            unattributed_storage_read_bytes: 0,
+            unattributed_storage_write_bytes: 0,
             unresolved_path_count: 0,
             dropped_event_count: 0,
             attribution_note: "procfs is unavailable on this host, so live sampler attribution could not be collected.".to_string(),
@@ -352,11 +398,21 @@ fn apply_proc_delta(
             .write_syscalls
             .saturating_add(after.syscw.saturating_sub(before.syscw));
         agg.open_file_count = after.open_files.len();
+        agg.readable_fd_count = after
+            .open_files
+            .iter()
+            .filter(|open| open.flags.map(open_flags_readable).unwrap_or(false))
+            .count();
+        agg.writable_fd_count = after
+            .open_files
+            .iter()
+            .filter(|open| open.flags.map(open_flags_writable).unwrap_or(false))
+            .count();
         let mut unique_paths = HashSet::new();
-        for path in &after.open_files {
-            if unique_paths.insert(path.clone()) {
-                *agg.file_hits.entry(path.clone()).or_default() += 1;
-                if let Some(parent) = Path::new(path).parent() {
+        for open in &after.open_files {
+            if unique_paths.insert(open.path.clone()) {
+                *agg.file_hits.entry(open.path.clone()).or_default() += 1;
+                if let Some(parent) = Path::new(&open.path).parent() {
                     *agg.dir_hits
                         .entry(parent.display().to_string())
                         .or_default() += 1;
@@ -371,6 +427,12 @@ fn apply_proc_delta(
         let write_share = after.write_bytes.saturating_sub(before.write_bytes) / share_count;
         let read_ops_share = after.syscr.saturating_sub(before.syscr) / share_count;
         let write_ops_share = after.syscw.saturating_sub(before.syscw) / share_count;
+        let mut metadata_by_path = HashMap::new();
+        for open in &after.open_files {
+            metadata_by_path
+                .entry(open.path.clone())
+                .or_insert_with(|| open.clone());
+        }
         for path in unique_paths {
             let entry = file_map.entry(path.clone()).or_insert_with(|| FileSummary {
                 file_path: path.clone(),
@@ -378,6 +440,14 @@ fn apply_proc_delta(
             });
             entry.last_pid_touching_file = *pid;
             entry.last_access_timestamp = Utc::now().to_rfc3339();
+            if let Some(open) = metadata_by_path.get(&path) {
+                entry.last_seen_offset_bytes = open.position;
+                entry.last_seen_open_flags = open
+                    .flags
+                    .map(format_open_flags)
+                    .unwrap_or_else(|| "-".to_string());
+                entry.last_seen_mount_id = open.mount_id;
+            }
             if read_share > 0 || read_ops_share > 0 {
                 entry.readers_count += 1;
             }
@@ -433,10 +503,11 @@ fn build_sampler_report(
     start_devices: HashMap<String, Vec<u64>>,
 ) -> DiagnosticReport {
     let elapsed_secs = started.elapsed().as_secs().max(1);
-    let total_observed_storage = per_pid
-        .values()
-        .map(|p| p.storage_read_bytes + p.storage_write_bytes)
-        .sum::<u64>() as f64;
+    let observed_storage_read_bytes = per_pid.values().map(|p| p.storage_read_bytes).sum::<u64>();
+    let observed_storage_write_bytes =
+        per_pid.values().map(|p| p.storage_write_bytes).sum::<u64>();
+    let total_observed_storage =
+        (observed_storage_read_bytes + observed_storage_write_bytes) as f64;
     let mut processes = per_pid
         .values()
         .map(|agg| {
@@ -475,6 +546,8 @@ fn build_sampler_report(
                 write_syscalls_per_sec: agg.write_syscalls as f64 / elapsed_secs as f64,
                 sync_count: 0,
                 open_file_count: agg.open_file_count,
+                readable_fd_count: agg.readable_fd_count,
+                writable_fd_count: agg.writable_fd_count,
                 hottest_file,
                 hottest_directory,
                 observed_share_percent: if total_observed_storage > 0.0 {
@@ -505,12 +578,19 @@ fn build_sampler_report(
     directories.truncate(25);
 
     let devices = summarize_devices(start_devices, diskstats_map());
+    let (device_storage_read_bytes, device_storage_write_bytes) =
+        summarize_device_storage_totals(&devices);
+    let unattributed_storage_read_bytes = device_storage_read_bytes
+        .saturating_sub(observed_storage_read_bytes);
+    let unattributed_storage_write_bytes = device_storage_write_bytes
+        .saturating_sub(observed_storage_write_bytes);
     let mut restricted = restricted_processes.values().cloned().collect::<Vec<_>>();
     restricted.sort_by(|a, b| a.command.cmp(&b.command).then_with(|| a.pid.cmp(&b.pid)));
     let kernel_process_count = restricted
         .iter()
         .filter(|process| is_kernel_like_command(&process.command))
         .count() as u64;
+    let kernel_activity = summarize_kernel_activity(restricted_processes.values());
     restricted.truncate(16);
 
     DiagnosticReport {
@@ -526,9 +606,16 @@ fn build_sampler_report(
         restricted_process_count: restricted_processes.len() as u64,
         kernel_process_count,
         restricted_processes: restricted,
+        kernel_activity,
+        observed_storage_read_bytes,
+        observed_storage_write_bytes,
+        device_storage_read_bytes,
+        device_storage_write_bytes,
+        unattributed_storage_read_bytes,
+        unattributed_storage_write_bytes,
         unresolved_path_count,
         dropped_event_count: 0,
-        attribution_note: "Logical syscall bytes (rchar/wchar) and storage-layer bytes (read_bytes/write_bytes) are reported separately. File and directory attribution in sampler mode is best-effort based on observed open descriptors and procfs deltas; it is not exact per-file kernel attribution. Processes owned by other users may require root to read /proc/<pid>/io, and kernel writeback activity may remain unattributed at the process layer.".to_string(),
+        attribution_note: "Logical syscall bytes (rchar/wchar) and storage-layer bytes (read_bytes/write_bytes) are reported separately. File and directory attribution in sampler mode is best-effort based on observed open descriptors, fdinfo metadata, and procfs deltas; it is not exact per-file kernel attribution. Processes owned by other users may require root to read /proc/<pid>/io, and device-level bytes may exceed process-attributed bytes when kernel writeback, journaling, or restricted processes are active.".to_string(),
         fallback_message: None,
     }
 }
@@ -561,6 +648,13 @@ pub fn run_deep_trace(
             restricted_process_count: 0,
             kernel_process_count: 0,
             restricted_processes: vec![],
+            kernel_activity: vec![],
+            observed_storage_read_bytes: 0,
+            observed_storage_write_bytes: 0,
+            device_storage_read_bytes: 0,
+            device_storage_write_bytes: 0,
+            unattributed_storage_read_bytes: 0,
+            unattributed_storage_write_bytes: 0,
             unresolved_path_count: 0,
             dropped_event_count: 0,
             attribution_note: "deep trace requires root and kernel tracing support; when unavailable, the application can fall back to sampler mode".to_string(),
@@ -676,18 +770,36 @@ fn is_kernel_like_command(command: &str) -> bool {
         || trimmed.contains("jbd2/")
 }
 
-fn read_open_files(pid: i32) -> Vec<String> {
+fn read_open_files(pid: i32) -> Vec<OpenFileInfo> {
     let mut paths = Vec::new();
     let dir = format!("/proc/{}/fd", pid);
     let Ok(entries) = fs::read_dir(dir) else {
         return paths;
     };
     for entry in entries.flatten() {
+        let fd = entry
+            .file_name()
+            .to_string_lossy()
+            .parse::<i32>()
+            .ok();
         if let Some(path) = read_link_string(entry.path()) {
-            paths.push(path);
+            let (position, flags, mount_id) = fd
+                .and_then(|fd| read_fdinfo(pid, fd))
+                .unwrap_or((None, None, None));
+            paths.push(OpenFileInfo {
+                path,
+                position,
+                flags,
+                mount_id,
+            });
         }
     }
     paths
+}
+
+fn read_fdinfo(pid: i32, fd: i32) -> Option<(Option<u64>, Option<i32>, Option<u64>)> {
+    let text = fs::read_to_string(format!("/proc/{}/fdinfo/{}", pid, fd)).ok()?;
+    Some(parse_fdinfo(&text))
 }
 
 fn read_cmdline(pid: i32) -> Option<String> {
@@ -711,6 +823,74 @@ fn read_cmdline(pid: i32) -> Option<String> {
 fn parse_kv(line: &str) -> Option<(&str, u64)> {
     let (key, value) = line.split_once(':')?;
     Some((key.trim(), value.trim().parse::<u64>().ok()?))
+}
+
+fn parse_fdinfo(text: &str) -> (Option<u64>, Option<i32>, Option<u64>) {
+    let mut position = None;
+    let mut flags = None;
+    let mut mount_id = None;
+    for line in text.lines() {
+        let Some((key, raw)) = line.split_once(':') else {
+            continue;
+        };
+        let value = raw.trim();
+        match key.trim() {
+            "pos" => position = value.parse::<u64>().ok(),
+            "flags" => flags = i32::from_str_radix(value, 8).ok(),
+            "mnt_id" => mount_id = value.parse::<u64>().ok(),
+            _ => {}
+        }
+    }
+    (position, flags, mount_id)
+}
+
+fn open_flags_readable(flags: i32) -> bool {
+    (flags & libc::O_ACCMODE) == libc::O_RDONLY || (flags & libc::O_ACCMODE) == libc::O_RDWR
+}
+
+fn open_flags_writable(flags: i32) -> bool {
+    (flags & libc::O_ACCMODE) == libc::O_WRONLY || (flags & libc::O_ACCMODE) == libc::O_RDWR
+}
+
+fn format_open_flags(flags: i32) -> String {
+    let mut parts = Vec::new();
+    match flags & libc::O_ACCMODE {
+        libc::O_RDONLY => parts.push("rd"),
+        libc::O_WRONLY => parts.push("wr"),
+        libc::O_RDWR => parts.push("rdwr"),
+        _ => {}
+    }
+    if flags & libc::O_APPEND != 0 {
+        parts.push("append");
+    }
+    if linux_o_direct()
+        .map(|direct| flags & direct != 0)
+        .unwrap_or(false)
+    {
+        parts.push("direct");
+    }
+    if flags & libc::O_NONBLOCK != 0 {
+        parts.push("nonblock");
+    }
+    if flags & libc::O_SYNC != 0 {
+        parts.push("sync");
+    }
+    if parts.is_empty() {
+        format!("0o{:o}", flags)
+    } else {
+        parts.join("|")
+    }
+}
+
+fn linux_o_direct() -> Option<i32> {
+    #[cfg(target_os = "linux")]
+    {
+        Some(libc::O_DIRECT)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 fn summarize_directories(files: &[FileSummary]) -> Vec<DirectorySummary> {
@@ -768,6 +948,76 @@ fn summarize_devices(
     summaries
 }
 
+fn summarize_device_storage_totals(devices: &[DeviceSummary]) -> (u64, u64) {
+    let top_level = list_devices()
+        .ok()
+        .map(|devices| {
+            devices
+                .into_iter()
+                .filter(|device| !device.is_partition)
+                .map(|device| device.path.display().to_string())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut read_bytes = 0u64;
+    let mut write_bytes = 0u64;
+    for device in devices {
+        let include = if top_level.is_empty() {
+            true
+        } else {
+            top_level.contains(&device.device)
+        };
+        if include {
+            read_bytes = read_bytes.saturating_add(device.sectors_read.saturating_mul(512));
+            write_bytes = write_bytes.saturating_add(device.sectors_written.saturating_mul(512));
+        }
+    }
+    (read_bytes, write_bytes)
+}
+
+fn kernel_activity_category(command: &str) -> Option<&'static str> {
+    let trimmed = command.trim();
+    if trimmed.contains("writeback") || trimmed.contains("flush-") {
+        Some("writeback")
+    } else if trimmed.contains("jbd2/") || trimmed == "jbd2" {
+        Some("journal")
+    } else if trimmed.contains("kworker") {
+        Some("worker")
+    } else if is_kernel_like_command(trimmed) {
+        Some("kernel")
+    } else {
+        None
+    }
+}
+
+fn summarize_kernel_activity<'a>(
+    processes: impl IntoIterator<Item = &'a RestrictedProcessSummary>,
+) -> Vec<KernelActivityBucket> {
+    let mut map: BTreeMap<String, KernelActivityBucket> = BTreeMap::new();
+    for process in processes {
+        let Some(category) = kernel_activity_category(&process.command) else {
+            continue;
+        };
+        let entry = map
+            .entry(category.to_string())
+            .or_insert_with(|| KernelActivityBucket {
+                category: category.to_string(),
+                ..KernelActivityBucket::default()
+            });
+        entry.process_count += 1;
+        if entry.sample_commands.len() < 5 && !entry.sample_commands.contains(&process.command) {
+            entry.sample_commands.push(process.command.clone());
+        }
+    }
+    let mut buckets = map.into_values().collect::<Vec<_>>();
+    buckets.sort_by(|a, b| {
+        b.process_count
+            .cmp(&a.process_count)
+            .then_with(|| a.category.cmp(&b.category))
+    });
+    buckets
+}
+
 fn sort_processes(a: &ProcessSummary, b: &ProcessSummary) -> Ordering {
     let a_total = a.storage_read_bytes_per_sec + a.storage_write_bytes_per_sec;
     let b_total = b.storage_read_bytes_per_sec + b.storage_write_bytes_per_sec;
@@ -785,7 +1035,8 @@ fn sort_processes(a: &ProcessSummary, b: &ProcessSummary) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_kernel_like_command, parse_kv, summarize_directories, DiagnosticReport, FileSummary,
+        format_open_flags, is_kernel_like_command, parse_fdinfo, parse_kv, summarize_directories,
+        summarize_kernel_activity, DiagnosticReport, FileSummary, RestrictedProcessSummary,
     };
     use chrono::{TimeZone, Utc};
 
@@ -813,6 +1064,37 @@ mod tests {
         assert!(is_kernel_like_command("[kworker/u8:1-writeback]"));
         assert!(is_kernel_like_command("jbd2/mmcblk0p2-8"));
         assert!(!is_kernel_like_command("python3"));
+    }
+
+    #[test]
+    fn parses_fdinfo_metadata() {
+        let (position, flags, mount_id) = parse_fdinfo("pos:\t4096\nflags:\t0100002\nmnt_id:\t27\n");
+        assert_eq!(position, Some(4096));
+        assert_eq!(mount_id, Some(27));
+        assert_eq!(flags, i32::from_str_radix("0100002", 8).ok());
+    }
+
+    #[test]
+    fn formats_common_open_flags() {
+        let flags = i32::from_str_radix("0100002", 8).unwrap();
+        assert!(format_open_flags(flags).contains("rdwr"));
+    }
+
+    #[test]
+    fn summarizes_kernel_activity_buckets() {
+        let processes = vec![
+            RestrictedProcessSummary {
+                command: "[kworker/u8:1-writeback]".to_string(),
+                ..RestrictedProcessSummary::default()
+            },
+            RestrictedProcessSummary {
+                command: "jbd2/mmcblk0p2-8".to_string(),
+                ..RestrictedProcessSummary::default()
+            },
+        ];
+        let buckets = summarize_kernel_activity(processes.iter());
+        assert!(buckets.iter().any(|bucket| bucket.category == "writeback"));
+        assert!(buckets.iter().any(|bucket| bucket.category == "journal"));
     }
 
     #[test]

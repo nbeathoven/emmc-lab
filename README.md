@@ -49,6 +49,7 @@ Diagnostic mode works in two levels:
 - exact `op_count` stopping
 - logical sector range targeting and byte-range targeting
 - separate logical syscall bytes and storage-layer bytes in diagnostics
+- best-effort `fdinfo`-backed file context and unattributed device-I/O totals in diagnostics
 - health snapshots with graceful fallback when `mmc-utils` is missing
 - lightweight persistence without an external database
 - optional embedded SQLite feature flag
