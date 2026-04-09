@@ -112,7 +112,7 @@ emmc-lab wizard
 Run a saved profile:
 
 ```bash
-emmc-lab run --profile examples/file-randread.yaml
+emmc-lab run --profile examples/profiles/file-randread.yaml
 ```
 
 Run live diagnostics for 60 seconds:
@@ -161,7 +161,7 @@ Run `1,000,000` logical reads against one logical sector from the menu:
 Run `1,000,000` logical writes inside a selected logical sector range:
 
 ```bash
-emmc-lab run --profile examples/million-randwrite-range.yaml --i-understand-this-will-destroy-data
+emmc-lab run --profile examples/profiles/million-randwrite-range.yaml --i-understand-this-will-destroy-data
 ```
 
 Run the live I/O monitor with 1 second refresh:
@@ -256,11 +256,11 @@ cargo build --release --features sqlite
 ## Project Layout
 
 - `src/`: application source
-- `examples/`: example YAML profiles
+- `examples/`: consolidated shipped reference assets
+- `examples/profiles/`: example YAML profiles
+- `examples/reports/`: sample JSON and HTML report artifacts
 - `rpi/`: optional Debian-family install scripts and notes, including Raspberry Pi OS
-- `sample_reports/`: sample report artifacts
 - `tests/`: integration coverage
-- `docs/README.md`: detailed usage and operational notes
 
 ## Reporting and Storage
 
@@ -317,6 +317,9 @@ The repository includes the standard public-code publishing files:
 - [SECURITY.md](SECURITY.md)
 - [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
-## More Documentation
+## Reference Assets
 
-Detailed command usage, safety notes, and report behavior are in [docs/README.md](docs/README.md).
+The repo keeps shipped examples in one place:
+
+- profiles under [examples/profiles](/Users/nima/Documents/Develop/eMMC/examples/profiles)
+- sample report artifacts under [examples/reports](/Users/nima/Documents/Develop/eMMC/examples/reports)
