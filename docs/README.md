@@ -1,6 +1,6 @@
 # emmc-lab
 
-`emmc-lab` is a single Rust CLI application for Raspberry Pi OS / Debian Bookworm that combines:
+`emmc-lab` is a single Rust CLI application for Linux storage testing and I/O diagnostics that combines:
 
 - eMMC and file-backed workload testing
 - live procfs-based I/O diagnostics
@@ -14,7 +14,7 @@
 Requirements:
 
 - Rust toolchain (`cargo`, `rustc`)
-- Linux on Raspberry Pi OS / Debian Bookworm
+- Linux with `/proc`, `/sys`, and standard block-device interfaces
 
 Build:
 
@@ -23,7 +23,21 @@ cargo build --release
 sudo install -m 0755 target/release/emmc-lab /usr/local/bin/emmc-lab
 ```
 
-## Raspberry Pi Self-Deploy Install
+## Platform Support
+
+`emmc-lab` is Linux-first, not Raspberry Pi-only.
+
+- Runtime target: Linux
+- Works best on modern distributions with `/proc`, `/sys`, and standard block-device access
+- Common fit: Raspberry Pi OS, Debian, Ubuntu, and similar Linux distributions
+- Build hosts: Linux and macOS are both practical for development builds
+- Optional integrations such as `mmc-utils` and tracing remain Linux-specific
+
+Windows is not a supported runtime target today.
+
+## Debian-Family Self-Deploy Install
+
+The repository includes an optional helper installer under `rpi/` for Raspberry Pi OS and other `apt`-based Linux systems.
 
 Local install from a checkout:
 
@@ -99,15 +113,13 @@ emmc-lab
 
 Main menu:
 
-1. New Test Run
-2. Run Saved Profile
-3. Diagnostic Mode - Live Sampler
-4. Diagnostic Mode - Deep Trace
-5. Device Health / eMMC Health
-6. Reports / Export
-7. Settings / Paths / Defaults
-8. Help
-9. Exit
+1. Run Workload
+2. Diagnostics
+3. Device Health
+4. Reports
+5. Settings
+6. Help
+7. Exit
 
 The wizard supports:
 
@@ -157,7 +169,7 @@ emmc-lab wizard
 Health check:
 
 ```bash
-emmc-lab health --device /dev/mmcblk0
+emmc-lab health --device /dev/<device>
 ```
 
 Live sampler for 60 seconds:
@@ -216,10 +228,10 @@ Run test plus diagnostics together:
 emmc-lab run --profile examples/combined-test-with-diagnostics.yaml
 ```
 
-Health check for `/dev/mmcblk0`:
+Health check for a block device:
 
 ```bash
-emmc-lab health --device /dev/mmcblk0
+emmc-lab health --device /dev/<device>
 ```
 
 ## Reporting

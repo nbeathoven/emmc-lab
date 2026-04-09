@@ -1,6 +1,6 @@
 # emmc-lab
 
-`emmc-lab` is a single-binary Rust CLI for Raspberry Pi OS / Debian Bookworm that combines:
+`emmc-lab` is a single-binary Rust CLI for Linux storage testing and I/O diagnostics that combines:
 
 - eMMC and file-backed workload testing
 - exact operation-count random and sequential I/O runs
@@ -52,7 +52,7 @@ Diagnostic mode works in two levels:
 - health snapshots with graceful fallback when `mmc-utils` is missing
 - lightweight persistence without an external database
 - optional embedded SQLite feature flag
-- Raspberry Pi self-deploy installer
+- Debian-family self-deploy installer, including Raspberry Pi OS
 
 ## Important Limitation
 
@@ -71,6 +71,22 @@ Raw-device writing is destructive.
 3. the target is not the active root device
 4. the requested range fits the device
 5. the user passes `--i-understand-this-will-destroy-data`
+
+## Platform Support
+
+`emmc-lab` is Linux-first.
+
+- Runtime support: Linux systems with `/proc`, `/sys`, and standard block-device interfaces
+- Common targets: Raspberry Pi OS, Debian, Ubuntu, and similar modern Linux distributions
+- Build hosts: Linux and macOS are both practical for development builds
+- Optional Linux-only integrations: `mmc-utils`, tracing/eBPF, direct block-device access
+
+Current portability model:
+
+- the core app is not Raspberry Pi-specific
+- eMMC health features are most useful on systems that expose eMMC devices
+- diagnostics and raw-device workflows are Linux-only
+- Windows is not a supported runtime target today
 
 ## Quick Start
 
@@ -108,7 +124,7 @@ emmc-lab diag sample --duration 60 --interval-ms 1000
 Check device health:
 
 ```bash
-emmc-lab health --device /dev/mmcblk0
+emmc-lab health --device /dev/<device>
 ```
 
 ## Usage Examples
@@ -184,7 +200,9 @@ Run environment and capability checks:
 emmc-lab doctor
 ```
 
-## Raspberry Pi Install
+## Debian-Family Quick Install
+
+The repo includes an optional helper installer under `rpi/` for Raspberry Pi OS and other `apt`-based Linux distributions.
 
 Local install from a checkout:
 
@@ -219,7 +237,7 @@ emmc-lab
 
 Requirements:
 
-- Linux on Raspberry Pi OS / Debian Bookworm
+- Linux with `/proc`, `/sys`, and standard block-device interfaces
 - Rust toolchain (`cargo`, `rustc`) unless using the installer
 
 Build manually:
@@ -239,7 +257,7 @@ cargo build --release --features sqlite
 
 - `src/`: application source
 - `examples/`: example YAML profiles
-- `rpi/`: Raspberry Pi install scripts and notes
+- `rpi/`: optional Debian-family install scripts and notes, including Raspberry Pi OS
 - `sample_reports/`: sample report artifacts
 - `tests/`: integration coverage
 - `docs/README.md`: detailed usage and operational notes

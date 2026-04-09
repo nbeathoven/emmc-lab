@@ -137,7 +137,7 @@ Run the application with:
 Useful first commands:
   emmc-lab doctor
   emmc-lab wizard
-  emmc-lab health --device /dev/mmcblk0
+  emmc-lab health --device /dev/<device>
 
 Self-deploy command from GitHub:
   curl -fsSL https://raw.githubusercontent.com/nbeathoven/emmc-lab/main/rpi/install.sh | bash
@@ -146,7 +146,7 @@ EOF
 
 main() {
   if [[ "$(uname -s)" != "Linux" ]]; then
-    log "This installer is intended for Raspberry Pi OS / Debian Bookworm on Linux"
+    log "This installer is intended for Linux on Debian-family distributions, including Raspberry Pi OS"
     exit 1
   fi
 
@@ -161,4 +161,3 @@ main() {
 }
 
 main "$@"
-

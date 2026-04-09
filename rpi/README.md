@@ -1,4 +1,6 @@
-# Raspberry Pi Install
+# Debian-Family Quick Install
+
+This installer is optional and is intended for Raspberry Pi OS and other `apt`-based Linux systems.
 
 Local checkout install:
 

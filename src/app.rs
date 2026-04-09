@@ -1383,7 +1383,7 @@ fn print_help(paths: &AppPaths) {
     println!("Deep trace for 30 seconds: emmc-lab diag trace --duration 30");
     println!("Run test + diagnostics together: configure diagnostic capture = on in the wizard or YAML profile");
     println!("Export HTML report: emmc-lab export --session <id> --format html");
-    println!("Health check: emmc-lab health --device /dev/mmcblk0");
+    println!("Health check: emmc-lab health --device /dev/<device>");
 }
 
 fn derive_interference_note(diag: &DiagnosticReport) -> Option<String> {
@@ -1723,9 +1723,20 @@ fn is_auxiliary_device(device: &DeviceInfo) -> bool {
     device.name.starts_with("loop") || device.name.starts_with("ram")
 }
 
+fn preferred_raw_device_path() -> Option<PathBuf> {
+    let mut devices = list_devices().ok()?;
+    devices.sort_by_key(device_rank);
+    devices
+        .iter()
+        .find(|device| !device.is_partition && !is_auxiliary_device(device))
+        .or_else(|| devices.iter().find(|device| !is_auxiliary_device(device)))
+        .map(|device| device.path.clone())
+}
+
 fn default_target_path(mode: &TargetMode) -> PathBuf {
     match mode {
-        TargetMode::RawDevice => PathBuf::from("/dev/mmcblk0"),
+        TargetMode::RawDevice => preferred_raw_device_path()
+            .unwrap_or_else(|| PathBuf::from("/dev/mmcblk0")),
         TargetMode::FileBased => PathBuf::from("/tmp/emmc-lab.bin"),
     }
 }
