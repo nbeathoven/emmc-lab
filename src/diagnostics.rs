@@ -510,8 +510,7 @@ fn build_sampler_report(
 ) -> DiagnosticReport {
     let elapsed_secs = started.elapsed().as_secs().max(1);
     let observed_storage_read_bytes = per_pid.values().map(|p| p.storage_read_bytes).sum::<u64>();
-    let observed_storage_write_bytes =
-        per_pid.values().map(|p| p.storage_write_bytes).sum::<u64>();
+    let observed_storage_write_bytes = per_pid.values().map(|p| p.storage_write_bytes).sum::<u64>();
     let total_observed_storage =
         (observed_storage_read_bytes + observed_storage_write_bytes) as f64;
     let mut processes = per_pid
@@ -586,14 +585,14 @@ fn build_sampler_report(
     let devices = summarize_devices(start_devices, diskstats_map());
     let (device_storage_read_bytes, device_storage_write_bytes) =
         summarize_device_storage_totals(&devices);
-    let unattributed_storage_read_bytes = device_storage_read_bytes
-        .saturating_sub(observed_storage_read_bytes);
-    let unattributed_storage_write_bytes = device_storage_write_bytes
-        .saturating_sub(observed_storage_write_bytes);
-    let process_excess_storage_read_bytes = observed_storage_read_bytes
-        .saturating_sub(device_storage_read_bytes);
-    let process_excess_storage_write_bytes = observed_storage_write_bytes
-        .saturating_sub(device_storage_write_bytes);
+    let unattributed_storage_read_bytes =
+        device_storage_read_bytes.saturating_sub(observed_storage_read_bytes);
+    let unattributed_storage_write_bytes =
+        device_storage_write_bytes.saturating_sub(observed_storage_write_bytes);
+    let process_excess_storage_read_bytes =
+        observed_storage_read_bytes.saturating_sub(device_storage_read_bytes);
+    let process_excess_storage_write_bytes =
+        observed_storage_write_bytes.saturating_sub(device_storage_write_bytes);
     let mut restricted = restricted_processes.values().cloned().collect::<Vec<_>>();
     restricted.sort_by(|a, b| a.command.cmp(&b.command).then_with(|| a.pid.cmp(&b.pid)));
     let kernel_process_count = restricted
@@ -791,11 +790,7 @@ fn read_open_files(pid: i32) -> Vec<OpenFileInfo> {
         return paths;
     };
     for entry in entries.flatten() {
-        let fd = entry
-            .file_name()
-            .to_string_lossy()
-            .parse::<i32>()
-            .ok();
+        let fd = entry.file_name().to_string_lossy().parse::<i32>().ok();
         if let Some(path) = read_link_string(entry.path()) {
             let (position, flags, mount_id) = fd
                 .and_then(|fd| read_fdinfo(pid, fd))
@@ -1082,7 +1077,8 @@ mod tests {
 
     #[test]
     fn parses_fdinfo_metadata() {
-        let (position, flags, mount_id) = parse_fdinfo("pos:\t4096\nflags:\t0100002\nmnt_id:\t27\n");
+        let (position, flags, mount_id) =
+            parse_fdinfo("pos:\t4096\nflags:\t0100002\nmnt_id:\t27\n");
         assert_eq!(position, Some(4096));
         assert_eq!(mount_id, Some(27));
         assert_eq!(flags, i32::from_str_radix("0100002", 8).ok());

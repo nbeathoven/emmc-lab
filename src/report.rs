@@ -288,7 +288,9 @@ fn render_html(record: &SessionRecord) -> String {
         }
         html.push_str("</table>");
         if !diag.kernel_activity.is_empty() {
-            html.push_str("<table><tr><th>Kernel Class</th><th>Count</th><th>Sample Commands</th></tr>");
+            html.push_str(
+                "<table><tr><th>Kernel Class</th><th>Count</th><th>Sample Commands</th></tr>",
+            );
             for bucket in &diag.kernel_activity {
                 html.push_str(&format!(
                     "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
