@@ -116,6 +116,14 @@ pub fn list_sessions(paths: &AppPaths) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+pub fn delete_session(paths: &AppPaths, session_id: &str) -> Result<()> {
+    let dir = session_dir(paths, session_id);
+    if dir.exists() {
+        fs::remove_dir_all(&dir).with_context(|| format!("failed to remove {}", dir.display()))?;
+    }
+    Ok(())
+}
+
 pub fn list_profiles(paths: &AppPaths) -> Result<Vec<PathBuf>> {
     let mut profiles = Vec::new();
     if !paths.profiles_dir.exists() {

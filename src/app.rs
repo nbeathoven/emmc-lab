@@ -10,7 +10,8 @@ use crate::presets::{
 use crate::profile::{AddressingMode, DurabilityMode, Profile, TargetMode, WorkloadType};
 use crate::report::{export_session, terminal_summary, ExportFormat};
 use crate::storage::{
-    infer_profile_path, list_profiles, list_sessions, load_session, save_session, SessionRecord,
+    delete_session, infer_profile_path, list_profiles, list_sessions, load_session, save_session,
+    SessionRecord,
 };
 use crate::system::{
     assess_raw_target_safety, block_device_size, collect_capabilities, collect_system_snapshot,
@@ -21,7 +22,7 @@ use crate::ui::{
     render_selector_screen, render_settings, SelectorColumn, SelectorRow,
 };
 use anyhow::{bail, Result};
-use chrono::Utc;
+use chrono::{Local, Utc};
 use std::env;
 use std::ffi::CString;
 use std::fs;
@@ -57,6 +58,12 @@ enum WizardInput<T> {
 }
 
 struct MenuItem {
+    columns: Vec<String>,
+    detail: String,
+}
+
+struct SessionMenuEntry {
+    session_id: String,
     columns: Vec<String>,
     detail: String,
 }
@@ -1477,108 +1484,219 @@ fn health_flow(paths: &AppPaths) -> Result<()> {
 }
 
 fn reports_flow(paths: &AppPaths) -> Result<()> {
-    let sessions = list_sessions(paths)?;
-    if sessions.is_empty() {
-        println!("No sessions found");
-        return Ok(());
-    }
-    let session_items = sessions
-        .iter()
-        .map(|session| MenuItem {
-            columns: vec![session.clone()],
-            detail: format!("Saved session {}", session),
-        })
-        .collect::<Vec<_>>();
-    let Some(choice) = select_from_menu(
-        "EMMC-LAB REPORTS",
-        "Reports / Export",
-        vec![("Sessions".to_string(), sessions.len().to_string())],
-        &[SelectorColumn {
-            header: "Session ID",
-            min: 32,
-            max: 48,
-            align_right: false,
-        }],
-        &session_items,
-        0,
-    )?
-    else {
-        return Ok(());
-    };
-    let session_id = &sessions[choice];
-    let actions = vec![
-        MenuItem {
-            columns: vec![
-                "View terminal summary".to_string(),
-                "screen report".to_string(),
+    loop {
+        let sessions = session_menu_entries(paths)?;
+        if sessions.is_empty() {
+            println!("No sessions found");
+            return Ok(());
+        }
+        let session_items = sessions
+            .iter()
+            .map(|session| MenuItem {
+                columns: session.columns.clone(),
+                detail: session.detail.clone(),
+            })
+            .collect::<Vec<_>>();
+        let Some(choice) = select_from_menu(
+            "EMMC-LAB REPORTS",
+            "Reports / Export",
+            vec![("Sessions".to_string(), sessions.len().to_string())],
+            &[
+                SelectorColumn {
+                    header: "When",
+                    min: 16,
+                    max: 18,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Type",
+                    min: 10,
+                    max: 12,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Name",
+                    min: 18,
+                    max: 26,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Target",
+                    min: 16,
+                    max: 26,
+                    align_right: false,
+                },
             ],
-            detail: format!(
-                "Render the saved session {} directly in the terminal.",
-                session_id
-            ),
-        },
-        MenuItem {
-            columns: vec!["Export JSON".to_string(), "machine-readable".to_string()],
-            detail: "Write a JSON export under the exports directory.".to_string(),
-        },
-        MenuItem {
-            columns: vec!["Export CSV".to_string(), "spreadsheet-friendly".to_string()],
-            detail: "Write CSV exports for summary, intervals, and processes where present."
-                .to_string(),
-        },
-        MenuItem {
-            columns: vec!["Export HTML".to_string(), "shareable report".to_string()],
-            detail: "Write an HTML report under the exports directory.".to_string(),
-        },
-        MenuItem {
-            columns: vec!["Back".to_string(), "return to sessions".to_string()],
-            detail: "Leave this session without viewing or exporting it.".to_string(),
-        },
-    ];
-    let Some(action) = select_from_menu(
-        "EMMC-LAB REPORT ACTIONS",
-        "Reports / Export",
-        vec![("Session".to_string(), session_id.clone())],
-        &[
-            SelectorColumn {
-                header: "Action",
-                min: 20,
-                max: 24,
-                align_right: false,
+            &session_items,
+            0,
+        )?
+        else {
+            return Ok(());
+        };
+        let session = &sessions[choice];
+        let actions = vec![
+            MenuItem {
+                columns: vec![
+                    "View terminal summary".to_string(),
+                    "screen report".to_string(),
+                ],
+                detail: format!(
+                    "Render the saved session {} directly in the terminal.",
+                    session.session_id
+                ),
             },
-            SelectorColumn {
-                header: "Purpose",
-                min: 18,
-                max: 32,
-                align_right: false,
+            MenuItem {
+                columns: vec!["Export JSON".to_string(), "machine-readable".to_string()],
+                detail: "Write a JSON export under the exports directory.".to_string(),
             },
-        ],
-        &actions,
-        0,
-    )?
-    else {
-        return Ok(());
-    };
-    match action {
-        0 => {
-            run_report(paths, session_id)?;
-            pause()?;
+            MenuItem {
+                columns: vec!["Export CSV".to_string(), "spreadsheet-friendly".to_string()],
+                detail: "Write CSV exports for summary, intervals, and processes where present."
+                    .to_string(),
+            },
+            MenuItem {
+                columns: vec!["Export HTML".to_string(), "shareable report".to_string()],
+                detail: "Write an HTML report under the exports directory.".to_string(),
+            },
+            MenuItem {
+                columns: vec![
+                    "Delete session".to_string(),
+                    "remove saved data".to_string(),
+                ],
+                detail: "Delete this saved session directory and all exported data inside it."
+                    .to_string(),
+            },
+            MenuItem {
+                columns: vec!["Back".to_string(), "return to sessions".to_string()],
+                detail: "Leave this session without viewing or exporting it.".to_string(),
+            },
+        ];
+        let Some(action) = select_from_menu(
+            "EMMC-LAB REPORT ACTIONS",
+            "Reports / Export",
+            vec![
+                ("When".to_string(), session.columns[0].clone()),
+                ("Type".to_string(), session.columns[1].clone()),
+                ("Name".to_string(), session.columns[2].clone()),
+                ("Target".to_string(), session.columns[3].clone()),
+            ],
+            &[
+                SelectorColumn {
+                    header: "Action",
+                    min: 20,
+                    max: 24,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Purpose",
+                    min: 18,
+                    max: 32,
+                    align_right: false,
+                },
+            ],
+            &actions,
+            0,
+        )?
+        else {
+            continue;
+        };
+        match action {
+            0 => {
+                run_report(paths, &session.session_id)?;
+                pause()?;
+            }
+            1 => {
+                run_export(paths, &session.session_id, ExportFormat::Json)?;
+                pause()?;
+            }
+            2 => {
+                run_export(paths, &session.session_id, ExportFormat::Csv)?;
+                pause()?;
+            }
+            3 => {
+                run_export(paths, &session.session_id, ExportFormat::Html)?;
+                pause()?;
+            }
+            4 => match prompt_bool_default(
+                &format!("Delete session {} [rec n]", session.columns[2]),
+                false,
+                Some("Removes the saved session directory, including its summary and interval files."),
+            )? {
+                WizardInput::Value(true) => {
+                    delete_session(paths, &session.session_id)?;
+                    println!("Deleted session {}", session.session_id);
+                    pause()?;
+                }
+                WizardInput::Value(false) | WizardInput::Back | WizardInput::Cancel => {}
+            },
+            _ => continue,
         }
-        1 => {
-            run_export(paths, session_id, ExportFormat::Json)?;
-            pause()?;
-        }
-        2 => {
-            run_export(paths, session_id, ExportFormat::Csv)?;
-            pause()?;
-        }
-        3 => {
-            run_export(paths, session_id, ExportFormat::Html)?;
-            pause()?;
-        }
-        _ => {}
     }
-    Ok(())
+}
+
+fn session_menu_entries(paths: &AppPaths) -> Result<Vec<SessionMenuEntry>> {
+    let mut entries = Vec::new();
+    for session_id in list_sessions(paths)? {
+        let record = load_session(paths, &session_id)?;
+        let created = record
+            .created_at
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+        let kind = session_kind_label(&record);
+        let name = session_name_label(&record);
+        let target = session_target_label(&record);
+        let detail = format!(
+            "{} session {} on {}",
+            kind,
+            session_id,
+            record.system.hostname.unwrap_or_else(|| "-".to_string())
+        );
+        entries.push(SessionMenuEntry {
+            session_id,
+            columns: vec![created, kind.to_string(), name, target],
+            detail,
+        });
+    }
+    Ok(entries)
+}
+
+fn session_kind_label(record: &SessionRecord) -> &'static str {
+    if record.run_summary.is_some() {
+        "run"
+    } else if record.diagnostics.is_some() {
+        "diag"
+    } else {
+        "other"
+    }
+}
+
+fn session_name_label(record: &SessionRecord) -> String {
+    if let Some(profile) = &record.profile {
+        return profile.name.clone();
+    }
+    if let Some(diag) = &record.diagnostics {
+        return format!("{:?}", diag.mode).to_lowercase().replace('_', "-");
+    }
+    "unnamed".to_string()
+}
+
+fn session_target_label(record: &SessionRecord) -> String {
+    if let Some(run) = &record.run_summary {
+        return short_target_label(&run.target_path);
+    }
+    if let Some(profile) = &record.profile {
+        return short_target_label(&profile.target.path);
+    }
+    "-".to_string()
+}
+
+fn short_target_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn run_profile_session_interactive(paths: &AppPaths, profile: Profile) -> Result<()> {

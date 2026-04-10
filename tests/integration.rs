@@ -4,7 +4,10 @@ use emmc_lab::engine::execute_profile;
 use emmc_lab::health::read_emmc_health;
 use emmc_lab::profile::{AddressingMode, Profile, TargetMode, WorkloadType};
 use emmc_lab::report::{export_session, ExportFormat};
-use emmc_lab::storage::{load_session, load_session_with_intervals, save_session, SessionRecord};
+use emmc_lab::storage::{
+    delete_session, load_session, load_session_with_intervals, save_session, session_dir,
+    SessionRecord,
+};
 use emmc_lab::system::{assess_raw_target_safety, list_devices, AppPaths};
 use std::fs;
 use tempfile::TempDir;
@@ -149,6 +152,19 @@ fn export_generation_writes_json_csv_html() -> Result<()> {
     assert!(!json.is_empty());
     assert!(!csv.is_empty());
     assert!(!html.is_empty());
+    Ok(())
+}
+
+#[test]
+fn delete_session_removes_saved_directory() -> Result<()> {
+    let (_dir, paths) = temp_paths()?;
+    let mut session = SessionRecord::new("delete-me".to_string());
+    session.notes.push("example".to_string());
+    save_session(&paths, &session)?;
+    let dir = session_dir(&paths, "delete-me");
+    assert!(dir.exists());
+    delete_session(&paths, "delete-me")?;
+    assert!(!dir.exists());
     Ok(())
 }
 
