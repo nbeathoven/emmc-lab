@@ -151,8 +151,14 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
             1 => diagnostics_flow(paths)?,
             2 => health_flow(paths)?,
             3 => reports_flow(paths)?,
-            4 => settings_flow(paths)?,
-            5 => print_help(paths),
+            4 => {
+                settings_flow(paths)?;
+                pause()?;
+            }
+            5 => {
+                print_help(paths);
+                pause()?;
+            }
             6 => break,
             _ => unreachable!(),
         }
