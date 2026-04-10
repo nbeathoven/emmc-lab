@@ -1027,8 +1027,10 @@ pub fn render_live_monitor(
 ) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB LIVE MONITOR");
-    let compact = ui.height <= 34;
-    let medium = ui.height <= 52;
+    // Switch to reduced layouts earlier so the header and top process table stay visible
+    // on shorter SSH terminal windows instead of scrolling off the screen.
+    let compact = ui.height <= 44;
+    let medium = ui.height <= 60;
     let overview_rows = vec![
         ("Updated".to_string(), report.ended_at.to_rfc3339()),
         (
@@ -1760,9 +1762,9 @@ fn row_limit(width: usize) -> usize {
 
 fn live_process_limit(width: usize, height: usize) -> usize {
     let width_limit = row_limit(width);
-    if height <= 34 {
+    if height <= 44 {
         width_limit.min(4)
-    } else if height <= 44 {
+    } else if height <= 60 {
         width_limit.min(5)
     } else {
         width_limit
@@ -1771,9 +1773,9 @@ fn live_process_limit(width: usize, height: usize) -> usize {
 
 fn live_device_limit(width: usize, height: usize) -> usize {
     let width_limit = row_limit(width);
-    if height <= 34 {
+    if height <= 44 {
         width_limit.min(3)
-    } else if height <= 44 {
+    } else if height <= 60 {
         width_limit.min(4)
     } else {
         width_limit
