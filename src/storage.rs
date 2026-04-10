@@ -50,7 +50,9 @@ pub fn save_session(paths: &AppPaths, record: &SessionRecord) -> Result<PathBuf>
     let dir = session_dir(paths, &record.session_id);
     fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     let summary_path = dir.join("session.json");
-    let summary_text = serde_json::to_string_pretty(record)?;
+    let mut summary_record = record.clone();
+    summary_record.interval_stats.clear();
+    let summary_text = serde_json::to_string_pretty(&summary_record)?;
     fs::write(&summary_path, summary_text)
         .with_context(|| format!("failed to write {}", summary_path.display()))?;
 
@@ -76,6 +78,29 @@ pub fn load_session(paths: &AppPaths, session_id: &str) -> Result<SessionRecord>
     let record = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(record)
+}
+
+pub fn load_session_with_intervals(paths: &AppPaths, session_id: &str) -> Result<SessionRecord> {
+    let mut record = load_session(paths, session_id)?;
+    record.interval_stats = load_intervals(paths, session_id)?;
+    Ok(record)
+}
+
+pub fn load_intervals(paths: &AppPaths, session_id: &str) -> Result<Vec<IntervalStats>> {
+    let path = session_dir(paths, session_id).join("intervals.jsonl");
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut intervals = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let interval = serde_json::from_str(trimmed)
+            .with_context(|| format!("failed to parse {} line {}", path.display(), index + 1))?;
+        intervals.push(interval);
+    }
+    Ok(intervals)
 }
 
 pub fn list_sessions(paths: &AppPaths) -> Result<Vec<String>> {

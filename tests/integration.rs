@@ -4,7 +4,7 @@ use emmc_lab::engine::execute_profile;
 use emmc_lab::health::read_emmc_health;
 use emmc_lab::profile::{AddressingMode, Profile, TargetMode, WorkloadType};
 use emmc_lab::report::{export_session, ExportFormat};
-use emmc_lab::storage::{load_session, save_session, SessionRecord};
+use emmc_lab::storage::{load_session, load_session_with_intervals, save_session, SessionRecord};
 use emmc_lab::system::{assess_raw_target_safety, list_devices, AppPaths};
 use std::fs;
 use tempfile::TempDir;
@@ -101,6 +101,21 @@ fn combined_test_and_diagnostics_session_is_saved() -> Result<()> {
     let session = load_session(&paths, &session_id)?;
     assert!(session.run_summary.is_some());
     assert!(session.diagnostics.is_some());
+    Ok(())
+}
+
+#[test]
+fn session_json_is_summary_only_but_intervals_can_be_loaded() -> Result<()> {
+    let (_dir, paths) = temp_paths()?;
+    let target = paths.base_dir.join("summary-only.bin");
+    let mut profile = file_profile(&target);
+    profile.workload.runtime_seconds = Some(1);
+    profile.workload.exact_op_count = None;
+    let session_id = run_profile_session(&paths, profile)?;
+    let summary = load_session(&paths, &session_id)?;
+    let full = load_session_with_intervals(&paths, &session_id)?;
+    assert!(summary.interval_stats.is_empty());
+    assert!(!full.interval_stats.is_empty());
     Ok(())
 }
 

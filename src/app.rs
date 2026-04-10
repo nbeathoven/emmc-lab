@@ -448,14 +448,18 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
     if profile.name.trim().is_empty() {
         profile.name = default_profile_name(&profile);
     }
+    println!("Tip: Enter keeps the default. Type ? for a short explanation. Type back or cancel to leave a step.");
     while step < 15 {
         let hints = wizard_target_hints(&profile);
         match step {
             0 => {
-                match prompt_menu_default(
+                match prompt_menu_default_help(
                     "Mode [1=raw, 2=file]",
                     target_mode_choice(&profile.target.mode),
                     &["1", "2"],
+                    Some(
+                        "raw uses a block device directly and can be destructive; file uses a regular file and is the safer default.",
+                    ),
                 )? {
                     WizardInput::Value(value) => {
                         profile.target.mode = if value == "1" {
@@ -470,10 +474,13 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 }
             }
             2 => {
-                match prompt_menu_default(
+                match prompt_menu_default_help(
                     "Workload [1=randread, 2=randwrite, 3=randrw, 4=read, 5=write]",
                     workload_choice(&profile.workload.test_type),
                     &["1", "2", "3", "4", "5"],
+                    Some(
+                        "randread and randwrite pick random offsets, read and write scan sequentially, and randrw mixes both.",
+                    ),
                 )? {
                     WizardInput::Value(value) => {
                         profile.workload.test_type = match value.as_str() {
@@ -519,6 +526,9 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             default_size.clamp(min_size, max_size),
                             min_size,
                             max_size,
+                            Some(
+                                "If the file does not exist, create it at run time with this size. Existing files are left alone.",
+                            ),
                         )? {
                             WizardInput::Value(value) => {
                                 profile.target.create_if_missing_size_bytes = Some(value);
@@ -536,13 +546,16 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 }
                 WizardInput::Cancel => return Ok(None),
             },
-            3 => match prompt_menu_default(
+            3 => match prompt_menu_default_help(
                 &format!(
                     "Range [1=all, 2=sectors, 3=bytes, 4=one sector] [{}]",
                     range_hint_label(&hints)
                 ),
                 addressing_choice(&profile.addressing.mode),
                 &["1", "2", "3", "4"],
+                Some(
+                    "all uses the whole target, sectors uses logical LBAs, bytes uses byte offsets, and one sector repeats against a single logical sector.",
+                ),
             )? {
                 WizardInput::Value(value) => match value.as_str() {
                     "1" => {
@@ -563,6 +576,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             profile.addressing.start_sector.unwrap_or(0),
                             0,
                             max_sector,
+                            Some("Logical sector number from the start of the target. This is LBA addressing, not a physical NAND location."),
                         )? {
                             WizardInput::Value(value) => value,
                             WizardInput::Back => continue,
@@ -579,6 +593,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             default_count.max(1),
                             1,
                             max_count.max(1),
+                            Some("How many logical sectors to include starting at the chosen start sector."),
                         )? {
                             WizardInput::Value(value) => value,
                             WizardInput::Back => continue,
@@ -603,6 +618,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             profile.addressing.start_offset_bytes.unwrap_or(0),
                             0,
                             max_offset,
+                            Some("Byte offset from the start of the target."),
                         )? {
                             WizardInput::Value(value) => value,
                             WizardInput::Back => continue,
@@ -622,6 +638,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             default_range.max(1),
                             1,
                             max_range.max(1),
+                            Some("How many bytes to include starting from the chosen byte offset."),
                         )? {
                             WizardInput::Value(value) => value,
                             WizardInput::Back => continue,
@@ -644,6 +661,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             profile.addressing.start_sector.unwrap_or(0),
                             0,
                             max_sector,
+                            Some("A single logical sector to hit repeatedly. This is useful for exact-count logical-sector tests."),
                         )? {
                             WizardInput::Value(value) => value,
                             WizardInput::Back => continue,
@@ -674,10 +692,13 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 }
                 WizardInput::Cancel => return Ok(None),
             },
-            4 => match prompt_menu_default(
+            4 => match prompt_menu_default_help(
                 "Stop [1=time, 2=ops]",
                 stop_choice(profile.workload.exact_op_count.is_some()),
                 &["1", "2"],
+                Some(
+                    "time stops after a runtime in seconds; ops stops after an exact number of completed I/O operations.",
+                ),
             )? {
                 WizardInput::Value(value) => match value.as_str() {
                     "1" => {
@@ -686,6 +707,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             profile.workload.runtime_seconds.unwrap_or(30),
                             5,
                             86_400,
+                            Some("How long to run before stopping."),
                         )? {
                             WizardInput::Value(value) => value,
                             WizardInput::Back => continue,
@@ -700,6 +722,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                             profile.workload.exact_op_count.unwrap_or(1_000_000),
                             1,
                             1_000_000_000,
+                            Some("Exact number of completed I/O operations before the run stops."),
                         )? {
                             WizardInput::Value(value) => value,
                             WizardInput::Back => continue,
@@ -730,6 +753,9 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 ),
                 block_size_floor(&profile, hints.logical_sector_size),
                 1_048_576,
+                Some(
+                    "Bytes per I/O request. Larger blocks usually raise throughput; direct or raw I/O requires proper alignment.",
+                ),
             )? {
                 WizardInput::Value(value) => profile.workload.block_size_bytes = value,
                 WizardInput::Back => {
@@ -743,6 +769,9 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 profile.workload.queue_depth.clamp(1, 8),
                 1,
                 64,
+                Some(
+                    "How many I/O requests each worker can keep in flight at once. Higher values increase concurrency and can change latency.",
+                ),
             )? {
                 WizardInput::Value(value) => profile.workload.queue_depth = value,
                 WizardInput::Back => {
@@ -760,6 +789,9 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     .min(suggested_worker_count()),
                 1,
                 64,
+                Some(
+                    "How many worker threads issue I/O in parallel. More workers increase concurrency and can change results.",
+                ),
             )? {
                 WizardInput::Value(value) => profile.workload.worker_count = value,
                 WizardInput::Back => {
@@ -769,7 +801,15 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             8 => {
-                match prompt_u64_in_range("Random seed", profile.workload.random_seed, 1, u64::MAX)?
+                match prompt_u64_in_range(
+                    "Random seed",
+                    profile.workload.random_seed,
+                    1,
+                    u64::MAX,
+                    Some(
+                        "Controls repeatable random offset selection. Use the same seed to reproduce a random pattern.",
+                    ),
+                )?
                 {
                     WizardInput::Value(value) => profile.workload.random_seed = value,
                     WizardInput::Back => {
@@ -789,6 +829,9 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     }
                 ),
                 profile.workload.direct_io,
+                Some(
+                    "Bypass the page cache where supported. This is closer to device behavior, but alignment rules apply and some filesystems reject it.",
+                ),
             )? {
                 WizardInput::Value(value) => profile.workload.direct_io = value,
                 WizardInput::Back => {
@@ -803,7 +846,13 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     profile.verification.enabled = false;
                     println!("Verify: off for read workloads.");
                 } else {
-                    match prompt_bool_default("Verify [rec n]", profile.verification.enabled)? {
+                    match prompt_bool_default(
+                        "Verify [rec n]",
+                        profile.verification.enabled,
+                        Some(
+                            "After writes, read data back and check it. This adds safety but reduces performance.",
+                        ),
+                    )? {
                         WizardInput::Value(enabled) => {
                             profile.workload.verify = enabled;
                             profile.verification.enabled = enabled;
@@ -821,10 +870,13 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     profile.durability.mode = DurabilityMode::Performance;
                     println!("Durability: performance for read workloads.");
                 } else {
-                    match prompt_menu_default(
+                    match prompt_menu_default_help(
                         "Durability [1=perf, 2=batch, 3=strict]",
                         durability_choice(&profile.durability.mode),
                         &["1", "2", "3"],
+                        Some(
+                            "performance avoids extra syncs, batch syncs periodically, and strict syncs more often for stronger durability.",
+                        ),
                     )? {
                         WizardInput::Value(value) => {
                             profile.durability.mode = match value.as_str() {
@@ -852,6 +904,9 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     }
                 ),
                 profile.telemetry.health_telemetry && hints.health_supported,
+                Some(
+                    "Collect MMC or eMMC health before and after the run when the platform supports it.",
+                ),
             )? {
                 WizardInput::Value(value) => profile.telemetry.health_telemetry = value,
                 WizardInput::Back => {
@@ -863,6 +918,9 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             13 => match prompt_bool_default(
                 "Diag capture [rec n]",
                 profile.diagnostics.capture_during_test,
+                Some(
+                    "Run the lightweight I/O sampler while the workload runs so you can spot interference from other processes.",
+                ),
             )? {
                 WizardInput::Value(value) => profile.diagnostics.capture_during_test = value,
                 WizardInput::Back => {
@@ -871,7 +929,11 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 }
                 WizardInput::Cancel => return Ok(None),
             },
-            14 => match prompt_string_default("Profile name", Some(&profile.name))? {
+            14 => match prompt_string_default_help(
+                "Profile name",
+                Some(&profile.name),
+                Some("Name used when saving the YAML profile for later reuse."),
+            )? {
                 WizardInput::Value(value) => profile.name = value,
                 WizardInput::Back => {
                     step -= 1;
@@ -1091,6 +1153,7 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
                 0,
                 0,
                 max_sector,
+                Some("A single logical sector to hit repeatedly. This is useful for exact-count logical-sector tests."),
             )? {
                 WizardInput::Value(value) => Some(value),
                 WizardInput::Back | WizardInput::Cancel => continue,
@@ -1352,12 +1415,13 @@ fn diagnostics_flow(paths: &AppPaths) -> Result<()> {
                     0,
                     0,
                     86_400,
+                    None,
                 )? {
                     WizardInput::Value(value) => value,
                     WizardInput::Back | WizardInput::Cancel => continue,
                 };
                 let interval =
-                    match prompt_u64_in_range("Refresh ms [rec 1000]", 1000, 250, 60_000)? {
+                    match prompt_u64_in_range("Refresh ms [rec 1000]", 1000, 250, 60_000, None)? {
                         WizardInput::Value(value) => value,
                         WizardInput::Back | WizardInput::Cancel => continue,
                     };
@@ -1372,11 +1436,11 @@ fn diagnostics_flow(paths: &AppPaths) -> Result<()> {
 }
 
 fn timed_capture_flow(paths: &AppPaths) -> Result<()> {
-    let duration = match prompt_u64_in_range("Sampler seconds [rec 60]", 60, 1, 86_400)? {
+    let duration = match prompt_u64_in_range("Sampler seconds [rec 60]", 60, 1, 86_400, None)? {
         WizardInput::Value(value) => value,
         WizardInput::Back | WizardInput::Cancel => return Ok(()),
     };
-    let interval = match prompt_u64_in_range("Sample ms [rec 1000]", 1000, 100, 60_000)? {
+    let interval = match prompt_u64_in_range("Sample ms [rec 1000]", 1000, 100, 60_000, None)? {
         WizardInput::Value(value) => value,
         WizardInput::Back | WizardInput::Cancel => return Ok(()),
     };
@@ -1385,11 +1449,11 @@ fn timed_capture_flow(paths: &AppPaths) -> Result<()> {
 }
 
 fn deep_trace_flow(paths: &AppPaths) -> Result<()> {
-    let duration = match prompt_u64_in_range("Trace seconds [rec 30]", 30, 1, 3_600)? {
+    let duration = match prompt_u64_in_range("Trace seconds [rec 30]", 30, 1, 3_600, None)? {
         WizardInput::Value(value) => value,
         WizardInput::Back | WizardInput::Cancel => return Ok(()),
     };
-    let fallback = match prompt_bool_default("Fallback to sampler?", true)? {
+    let fallback = match prompt_bool_default("Fallback to sampler?", true, None)? {
         WizardInput::Value(value) => value,
         WizardInput::Back | WizardInput::Cancel => return Ok(()),
     };
@@ -1587,7 +1651,18 @@ fn session_id() -> String {
 }
 
 fn prompt_string_default(label: &str, default: Option<&str>) -> Result<WizardInput<String>> {
+    prompt_string_default_help(label, default, None)
+}
+
+fn prompt_string_default_help(
+    label: &str,
+    default: Option<&str>,
+    help: Option<&str>,
+) -> Result<WizardInput<String>> {
     loop {
+        if let Some(help) = help {
+            println!("Help: {}", help);
+        }
         match default {
             Some(default) => print!("{} [{}]: ", label, default),
             None => print!("{}: ", label),
@@ -1603,6 +1678,13 @@ fn prompt_string_default(label: &str, default: Option<&str>) -> Result<WizardInp
         }
         if trimmed.eq_ignore_ascii_case("cancel") {
             return Ok(WizardInput::Cancel);
+        }
+        if trimmed == "?" {
+            if help.is_some() {
+                continue;
+            }
+            println!("No extra help is available for this field.");
+            continue;
         }
         if trimmed.is_empty() {
             if let Some(default) = default {
@@ -1620,8 +1702,17 @@ fn prompt_menu_default(
     default: &str,
     allowed: &[&str],
 ) -> Result<WizardInput<String>> {
+    prompt_menu_default_help(label, default, allowed, None)
+}
+
+fn prompt_menu_default_help(
+    label: &str,
+    default: &str,
+    allowed: &[&str],
+    help: Option<&str>,
+) -> Result<WizardInput<String>> {
     loop {
-        match prompt_string_default(label, Some(default))? {
+        match prompt_string_default_help(label, Some(default), help)? {
             WizardInput::Value(value) if allowed.contains(&value.as_str()) => {
                 return Ok(WizardInput::Value(value));
             }
@@ -1632,11 +1723,17 @@ fn prompt_menu_default(
     }
 }
 
-fn prompt_u64_in_range(label: &str, default: u64, min: u64, max: u64) -> Result<WizardInput<u64>> {
+fn prompt_u64_in_range(
+    label: &str,
+    default: u64,
+    min: u64,
+    max: u64,
+    help: Option<&str>,
+) -> Result<WizardInput<u64>> {
     let default_text = default.to_string();
     loop {
         let prompt_label = format!("{label} [{min}-{max}]");
-        match prompt_string_default(&prompt_label, Some(&default_text))? {
+        match prompt_string_default_help(&prompt_label, Some(&default_text), help)? {
             WizardInput::Value(value) => match value.parse::<u64>() {
                 Ok(parsed) if parsed >= min && parsed <= max => {
                     return Ok(WizardInput::Value(parsed))
@@ -1650,8 +1747,14 @@ fn prompt_u64_in_range(label: &str, default: u64, min: u64, max: u64) -> Result<
     }
 }
 
-fn prompt_u32_in_range(label: &str, default: u32, min: u32, max: u32) -> Result<WizardInput<u32>> {
-    match prompt_u64_in_range(label, default as u64, min as u64, max as u64)? {
+fn prompt_u32_in_range(
+    label: &str,
+    default: u32,
+    min: u32,
+    max: u32,
+    help: Option<&str>,
+) -> Result<WizardInput<u32>> {
+    match prompt_u64_in_range(label, default as u64, min as u64, max as u64, help)? {
         WizardInput::Value(value) => Ok(WizardInput::Value(value as u32)),
         WizardInput::Back => Ok(WizardInput::Back),
         WizardInput::Cancel => Ok(WizardInput::Cancel),
@@ -1663,18 +1766,23 @@ fn prompt_usize_in_range(
     default: usize,
     min: usize,
     max: usize,
+    help: Option<&str>,
 ) -> Result<WizardInput<usize>> {
-    match prompt_u64_in_range(label, default as u64, min as u64, max as u64)? {
+    match prompt_u64_in_range(label, default as u64, min as u64, max as u64, help)? {
         WizardInput::Value(value) => Ok(WizardInput::Value(value as usize)),
         WizardInput::Back => Ok(WizardInput::Back),
         WizardInput::Cancel => Ok(WizardInput::Cancel),
     }
 }
 
-fn prompt_bool_default(label: &str, default: bool) -> Result<WizardInput<bool>> {
+fn prompt_bool_default(
+    label: &str,
+    default: bool,
+    help: Option<&str>,
+) -> Result<WizardInput<bool>> {
     let default_text = if default { "y" } else { "n" };
     loop {
-        match prompt_string_default(&format!("{label} [y/n]"), Some(default_text))? {
+        match prompt_string_default_help(&format!("{label} [y/n]"), Some(default_text), help)? {
             WizardInput::Value(value) => match parse_yes_no(&value) {
                 Ok(parsed) => return Ok(WizardInput::Value(parsed)),
                 Err(_) => println!("Expected y or n"),

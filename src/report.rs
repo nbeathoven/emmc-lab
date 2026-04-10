@@ -1,4 +1,4 @@
-use crate::storage::{load_session, SessionRecord};
+use crate::storage::{load_session_with_intervals, SessionRecord};
 use crate::system::AppPaths;
 use crate::ui::render_session_summary;
 use anyhow::Result;
@@ -34,7 +34,7 @@ pub fn export_session(
     session_id: &str,
     format: ExportFormat,
 ) -> Result<Vec<PathBuf>> {
-    let record = load_session(paths, session_id)?;
+    let record = load_session_with_intervals(paths, session_id)?;
     fs::create_dir_all(&paths.exports_dir)?;
     match format {
         ExportFormat::Json => {
