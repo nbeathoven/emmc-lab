@@ -1606,21 +1606,46 @@ fn settings_flow(paths: &AppPaths) -> Result<()> {
 }
 
 fn print_help(paths: &AppPaths) {
-    println!("Interactive launch: emmc-lab");
-    println!("Run Workload -> Quick Presets: built-in named workloads resolved against current devices and files");
-    println!("Guided wizard: emmc-lab wizard");
+    println!("emmc-lab Help");
+    println!("=============");
+    println!();
+    println!("Start");
+    println!("-----");
+    println!("Interactive menu: emmc-lab");
+    println!("Direct wizard:    emmc-lab wizard");
     println!(
-        "Run saved profile: emmc-lab run --profile {}",
+        "Saved profile:    emmc-lab run --profile {}",
         paths.profiles_dir.join("example.yaml").display()
     );
-    println!("Exact 1,000,000 write run in selected logical sector range:");
-    println!("  emmc-lab run --profile /path/to/million-writes.yaml --i-understand-this-will-destroy-data");
-    println!("Live monitor: emmc-lab diag monitor --interval-ms 1000");
-    println!("Live sampler for 60 seconds: emmc-lab diag sample --duration 60");
-    println!("Deep trace for 30 seconds: emmc-lab diag trace --duration 30");
-    println!("Run test + diagnostics together: configure diagnostic capture = on in the wizard or YAML profile");
-    println!("Export HTML report: emmc-lab export --session <id> --format html");
-    println!("Health check: emmc-lab health --device /dev/<device>");
+    println!();
+    println!("Workloads");
+    println!("---------");
+    println!("Quick presets:    Run Workload -> Quick Presets");
+    println!("Custom run:       Run Workload -> Guided Custom Run");
+    println!("Repeat last run:  Run Workload -> Repeat Last Run");
+    println!("1M logical write: emmc-lab run --profile /path/to/million-writes.yaml --i-understand-this-will-destroy-data");
+    println!();
+    println!("Diagnostics");
+    println!("-----------");
+    println!("Live monitor:     emmc-lab diag monitor --interval-ms 1000");
+    println!("Timed sampler:    emmc-lab diag sample --duration 60");
+    println!("Deep trace:       emmc-lab diag trace --duration 30");
+    println!("Run + capture:    enable diagnostic capture in the wizard or YAML profile");
+    println!();
+    println!("Health And Reports");
+    println!("------------------");
+    println!("Health check:     emmc-lab health --device /dev/<device>");
+    println!("View report:      emmc-lab report --session <id>");
+    println!("Export HTML:      emmc-lab export --session <id> --format html");
+    println!("Doctor:           emmc-lab doctor");
+    println!("List devices:     emmc-lab list-devices");
+    println!();
+    println!("Wizard Tips");
+    println!("-----------");
+    println!("Enter keeps the default.");
+    println!("Type ? for a short field explanation.");
+    println!("Type back or cancel to leave a step.");
+    println!("Raw-device writes are destructive and require explicit confirmation.");
 }
 
 fn derive_interference_note(diag: &DiagnosticReport) -> Option<String> {
