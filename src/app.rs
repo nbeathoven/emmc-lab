@@ -61,6 +61,11 @@ struct MenuItem {
     detail: String,
 }
 
+struct Spinner {
+    stop: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+}
+
 enum MenuKey {
     Up,
     Down,
@@ -106,17 +111,39 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
             "EMMC-LAB OPERATOR CONSOLE",
             "Main Menu",
             vec![
-                ("Host".to_string(), collect_system_snapshot().hostname.unwrap_or_else(|| "-".to_string())),
-                ("Profiles".to_string(), paths.profiles_dir.display().to_string()),
-                ("Sessions".to_string(), paths.sessions_dir.display().to_string()),
+                (
+                    "Host".to_string(),
+                    collect_system_snapshot()
+                        .hostname
+                        .unwrap_or_else(|| "-".to_string()),
+                ),
+                (
+                    "Profiles".to_string(),
+                    paths.profiles_dir.display().to_string(),
+                ),
+                (
+                    "Sessions".to_string(),
+                    paths.sessions_dir.display().to_string(),
+                ),
             ],
             &[
-                SelectorColumn { header: "Action", min: 16, max: 22, align_right: false },
-                SelectorColumn { header: "Purpose", min: 24, max: 42, align_right: false },
+                SelectorColumn {
+                    header: "Action",
+                    min: 16,
+                    max: 22,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Purpose",
+                    min: 24,
+                    max: 42,
+                    align_right: false,
+                },
             ],
             &items,
             0,
-        )? else {
+        )?
+        else {
             break;
         };
         match choice {
@@ -160,22 +187,31 @@ fn run_workload_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Re
         let Some(choice) = select_from_menu(
             "EMMC-LAB WORKLOADS",
             "Run Workload",
-            vec![
-                (
-                    "Last Run".to_string(),
-                    last_profile
-                        .as_ref()
-                        .map(|profile| profile.name.clone())
-                        .unwrap_or_else(|| "-".to_string()),
-                ),
-            ],
+            vec![(
+                "Last Run".to_string(),
+                last_profile
+                    .as_ref()
+                    .map(|profile| profile.name.clone())
+                    .unwrap_or_else(|| "-".to_string()),
+            )],
             &[
-                SelectorColumn { header: "Action", min: 18, max: 22, align_right: false },
-                SelectorColumn { header: "Purpose", min: 22, max: 42, align_right: false },
+                SelectorColumn {
+                    header: "Action",
+                    min: 18,
+                    max: 22,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Purpose",
+                    min: 22,
+                    max: 42,
+                    align_right: false,
+                },
             ],
             &items,
             0,
-        )? else {
+        )?
+        else {
             return Ok(());
         };
         match choice {
@@ -226,7 +262,9 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
     );
 
     if profile.telemetry.health_telemetry {
-        record.health_before = Some(read_emmc_health(&profile.target.path)?);
+        record.health_before = Some(with_spinner("Collecting pre-run health", || {
+            read_emmc_health(&profile.target.path)
+        })?);
     }
 
     let stop_signal = Arc::new(AtomicBool::new(false));
@@ -241,12 +279,14 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
         None
     };
 
-    let (run_summary, intervals) = execute_profile(&profile)?;
+    let (run_summary, intervals) = with_spinner("Running workload", || execute_profile(&profile))?;
     record.run_summary = Some(run_summary);
     record.interval_stats = intervals;
 
     if profile.telemetry.health_telemetry {
-        record.health_after = Some(read_emmc_health(&profile.target.path)?);
+        record.health_after = Some(with_spinner("Collecting post-run health", || {
+            read_emmc_health(&profile.target.path)
+        })?);
     }
 
     if let Some(handle) = diag_handle {
@@ -257,17 +297,23 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
         }
     }
 
-    let path = save_session(paths, &record)?;
+    let path = with_spinner("Saving session", || save_session(paths, &record))?;
     println!("Saved session: {}", path.display());
 
     if profile.reporting.export_json {
-        let _ = export_session(paths, &record.session_id, ExportFormat::Json);
+        let _ = with_spinner("Exporting JSON", || {
+            export_session(paths, &record.session_id, ExportFormat::Json)
+        });
     }
     if profile.reporting.export_csv {
-        let _ = export_session(paths, &record.session_id, ExportFormat::Csv);
+        let _ = with_spinner("Exporting CSV", || {
+            export_session(paths, &record.session_id, ExportFormat::Csv)
+        });
     }
     if profile.reporting.export_html {
-        let _ = export_session(paths, &record.session_id, ExportFormat::Html);
+        let _ = with_spinner("Exporting HTML", || {
+            export_session(paths, &record.session_id, ExportFormat::Html)
+        });
     }
 
     println!("{}", terminal_summary(&record));
@@ -285,7 +331,7 @@ pub fn run_profile_path(
 }
 
 pub fn run_health(paths: &AppPaths, device: &Path) -> Result<()> {
-    let report = collect_health(paths, device)?;
+    let report = with_spinner("Collecting health", || collect_health(paths, device))?;
     println!("{}", render_health_report(&report));
     Ok(())
 }
@@ -297,17 +343,19 @@ pub fn run_diag_sample(
 ) -> Result<String> {
     let session_id = session_id();
     let mut record = SessionRecord::new(session_id.clone());
-    let report = run_live_sampler(
-        Duration::from_secs(duration_seconds.max(1)),
-        Duration::from_millis(interval_ms.max(100)),
-        Some(session_id.clone()),
-    )?;
+    let report = with_spinner("Capturing diagnostics", || {
+        run_live_sampler(
+            Duration::from_secs(duration_seconds.max(1)),
+            Duration::from_millis(interval_ms.max(100)),
+            Some(session_id.clone()),
+        )
+    })?;
     record.diagnostics = Some(report);
     record.notes.push(
         "Logical syscall bytes are reported separately from storage-layer bytes in procfs sampler mode."
             .to_string(),
     );
-    let path = save_session(paths, &record)?;
+    let path = with_spinner("Saving session", || save_session(paths, &record))?;
     println!("Saved session: {}", path.display());
     println!("{}", terminal_summary(&record));
     Ok(session_id)
@@ -346,13 +394,15 @@ pub fn run_diag_trace(
 ) -> Result<String> {
     let session_id = session_id();
     let mut record = SessionRecord::new(session_id.clone());
-    let report = run_deep_trace(
-        Duration::from_secs(duration_seconds.max(1)),
-        Some(session_id.clone()),
-        fallback_to_sampler,
-    )?;
+    let report = with_spinner("Running trace", || {
+        run_deep_trace(
+            Duration::from_secs(duration_seconds.max(1)),
+            Some(session_id.clone()),
+            fallback_to_sampler,
+        )
+    })?;
     record.diagnostics = Some(report);
-    let path = save_session(paths, &record)?;
+    let path = with_spinner("Saving session", || save_session(paths, &record))?;
     println!("Saved session: {}", path.display());
     println!("{}", terminal_summary(&record));
     Ok(session_id)
@@ -365,7 +415,9 @@ pub fn run_report(paths: &AppPaths, session_id: &str) -> Result<()> {
 }
 
 pub fn run_export(paths: &AppPaths, session_id: &str, format: ExportFormat) -> Result<()> {
-    let files = export_session(paths, session_id, format)?;
+    let files = with_spinner("Exporting report", || {
+        export_session(paths, session_id, format)
+    })?;
     for file in files {
         println!("{}", file.display());
     }
@@ -381,7 +433,7 @@ pub fn run_list_devices() -> Result<()> {
 }
 
 pub fn run_doctor(paths: &AppPaths) -> Result<()> {
-    let report = doctor(paths);
+    let report = with_spinner("Running doctor checks", || doctor(paths));
     println!("{}", render_doctor_report(&report));
     Ok(())
 }
@@ -915,12 +967,23 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
             "Run Workload > Quick Presets",
             vec![("Groups".to_string(), categories.len().to_string())],
             &[
-                SelectorColumn { header: "Group", min: 18, max: 30, align_right: false },
-                SelectorColumn { header: "Count", min: 10, max: 12, align_right: false },
+                SelectorColumn {
+                    header: "Group",
+                    min: 18,
+                    max: 30,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Count",
+                    min: 10,
+                    max: 12,
+                    align_right: false,
+                },
             ],
             &category_items,
             0,
-        )? else {
+        )?
+        else {
             return Ok(());
         };
         let category = categories[choice];
@@ -942,16 +1005,35 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
             .collect::<Vec<_>>();
         let Some(preset_choice) = select_from_menu(
             "EMMC-LAB QUICK PRESETS",
-            &format!("Run Workload > Quick Presets > {}", category_label(category)),
+            &format!(
+                "Run Workload > Quick Presets > {}",
+                category_label(category)
+            ),
             vec![("Group".to_string(), category_label(category).to_string())],
             &[
-                SelectorColumn { header: "Preset", min: 18, max: 30, align_right: false },
-                SelectorColumn { header: "Scope", min: 10, max: 12, align_right: false },
-                SelectorColumn { header: "Risk", min: 10, max: 12, align_right: false },
+                SelectorColumn {
+                    header: "Preset",
+                    min: 18,
+                    max: 30,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Scope",
+                    min: 10,
+                    max: 12,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Risk",
+                    min: 10,
+                    max: 12,
+                    align_right: false,
+                },
             ],
             &preset_items,
             0,
-        )? else {
+        )?
+        else {
             continue;
         };
         let preset = presets[preset_choice];
@@ -1039,20 +1121,39 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
             &format!("Run Workload > Quick Presets > {}", preset.name),
             vec![
                 ("Preset".to_string(), preset.name.to_string()),
-                ("Scope".to_string(), preset_scope_label(preset.target_scope).to_string()),
+                (
+                    "Scope".to_string(),
+                    preset_scope_label(preset.target_scope).to_string(),
+                ),
                 (
                     "Risk".to_string(),
-                    if preset.destructive { "destructive" } else { "safe" }.to_string(),
+                    if preset.destructive {
+                        "destructive"
+                    } else {
+                        "safe"
+                    }
+                    .to_string(),
                 ),
                 ("Profile".to_string(), profile.name.clone()),
             ],
             &[
-                SelectorColumn { header: "Action", min: 16, max: 20, align_right: false },
-                SelectorColumn { header: "Purpose", min: 18, max: 32, align_right: false },
+                SelectorColumn {
+                    header: "Action",
+                    min: 16,
+                    max: 20,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Purpose",
+                    min: 18,
+                    max: 32,
+                    align_right: false,
+                },
             ],
             &action_items,
             0,
-        )? else {
+        )?
+        else {
             continue;
         };
         match action {
@@ -1107,12 +1208,23 @@ fn run_saved_profile_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) 
         "Run Workload > Saved Profiles",
         vec![("Profiles".to_string(), profiles.len().to_string())],
         &[
-            SelectorColumn { header: "Name", min: 16, max: 28, align_right: false },
-            SelectorColumn { header: "Path", min: 24, max: 54, align_right: false },
+            SelectorColumn {
+                header: "Name",
+                min: 16,
+                max: 28,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Path",
+                min: 24,
+                max: 54,
+                align_right: false,
+            },
         ],
         &items,
         0,
-    )? else {
+    )?
+    else {
         return Ok(());
     };
     let selected = &profiles[choice];
@@ -1123,7 +1235,10 @@ fn run_saved_profile_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) 
             detail: profile.printable_summary(),
         },
         MenuItem {
-            columns: vec!["Edit in wizard".to_string(), "modify before run".to_string()],
+            columns: vec![
+                "Edit in wizard".to_string(),
+                "modify before run".to_string(),
+            ],
             detail: "Open the saved profile in the guided wizard.".to_string(),
         },
         MenuItem {
@@ -1138,16 +1253,30 @@ fn run_saved_profile_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) 
             ("Profile".to_string(), profile.name.clone()),
             (
                 "Description".to_string(),
-                profile.description.clone().unwrap_or_else(|| "-".to_string()),
+                profile
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string()),
             ),
         ],
         &[
-            SelectorColumn { header: "Action", min: 16, max: 20, align_right: false },
-            SelectorColumn { header: "Purpose", min: 22, max: 36, align_right: false },
+            SelectorColumn {
+                header: "Action",
+                min: 16,
+                max: 20,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Purpose",
+                min: 22,
+                max: 36,
+                align_right: false,
+            },
         ],
         &actions,
         0,
-    )? else {
+    )?
+    else {
         return Ok(());
     };
     match action {
@@ -1192,14 +1321,28 @@ fn diagnostics_flow(paths: &AppPaths) -> Result<()> {
         let Some(choice) = select_from_menu(
             "EMMC-LAB DIAGNOSTICS",
             "Diagnostics",
-            vec![("Saved Sessions".to_string(), paths.sessions_dir.display().to_string())],
+            vec![(
+                "Saved Sessions".to_string(),
+                paths.sessions_dir.display().to_string(),
+            )],
             &[
-                SelectorColumn { header: "Action", min: 16, max: 18, align_right: false },
-                SelectorColumn { header: "Purpose", min: 20, max: 34, align_right: false },
+                SelectorColumn {
+                    header: "Action",
+                    min: 16,
+                    max: 18,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Purpose",
+                    min: 20,
+                    max: 34,
+                    align_right: false,
+                },
             ],
             &items,
             0,
-        )? else {
+        )?
+        else {
             return Ok(());
         };
         match choice {
@@ -1280,17 +1423,29 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
         "EMMC-LAB REPORTS",
         "Reports / Export",
         vec![("Sessions".to_string(), sessions.len().to_string())],
-        &[SelectorColumn { header: "Session ID", min: 32, max: 48, align_right: false }],
+        &[SelectorColumn {
+            header: "Session ID",
+            min: 32,
+            max: 48,
+            align_right: false,
+        }],
         &session_items,
         0,
-    )? else {
+    )?
+    else {
         return Ok(());
     };
     let session_id = &sessions[choice];
     let actions = vec![
         MenuItem {
-            columns: vec!["View terminal summary".to_string(), "screen report".to_string()],
-            detail: format!("Render the saved session {} directly in the terminal.", session_id),
+            columns: vec![
+                "View terminal summary".to_string(),
+                "screen report".to_string(),
+            ],
+            detail: format!(
+                "Render the saved session {} directly in the terminal.",
+                session_id
+            ),
         },
         MenuItem {
             columns: vec!["Export JSON".to_string(), "machine-readable".to_string()],
@@ -1298,7 +1453,8 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
         },
         MenuItem {
             columns: vec!["Export CSV".to_string(), "spreadsheet-friendly".to_string()],
-            detail: "Write CSV exports for summary, intervals, and processes where present.".to_string(),
+            detail: "Write CSV exports for summary, intervals, and processes where present."
+                .to_string(),
         },
         MenuItem {
             columns: vec!["Export HTML".to_string(), "shareable report".to_string()],
@@ -1314,12 +1470,23 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
         "Reports / Export",
         vec![("Session".to_string(), session_id.clone())],
         &[
-            SelectorColumn { header: "Action", min: 20, max: 24, align_right: false },
-            SelectorColumn { header: "Purpose", min: 18, max: 32, align_right: false },
+            SelectorColumn {
+                header: "Action",
+                min: 20,
+                max: 24,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Purpose",
+                min: 18,
+                max: 32,
+                align_right: false,
+            },
         ],
         &actions,
         0,
-    )? else {
+    )?
+    else {
         return Ok(());
     };
     match action {
@@ -1556,9 +1723,16 @@ fn choose_file_target_path() -> Result<WizardInput<String>> {
                 columns: vec![
                     option.display().to_string(),
                     size,
-                    if index == 0 { "default".to_string() } else { "-".to_string() },
+                    if index == 0 {
+                        "default".to_string()
+                    } else {
+                        "-".to_string()
+                    },
                 ],
-                detail: format!("Use {} as the file-backed workload target.", option.display()),
+                detail: format!(
+                    "Use {} as the file-backed workload target.",
+                    option.display()
+                ),
             }
         })
         .collect::<Vec<_>>();
@@ -1575,13 +1749,29 @@ fn choose_file_target_path() -> Result<WizardInput<String>> {
         "Wizard > Select File Target",
         vec![("Suggestions".to_string(), options.len().to_string())],
         &[
-            SelectorColumn { header: "Path", min: 24, max: 48, align_right: false },
-            SelectorColumn { header: "Size", min: 10, max: 18, align_right: false },
-            SelectorColumn { header: "Hint", min: 8, max: 10, align_right: false },
+            SelectorColumn {
+                header: "Path",
+                min: 24,
+                max: 48,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Size",
+                min: 10,
+                max: 18,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Hint",
+                min: 8,
+                max: 10,
+                align_right: false,
+            },
         ],
         &items,
         0,
-    )? else {
+    )?
+    else {
         return Ok(WizardInput::Back);
     };
     if choice < options.len() {
@@ -1656,23 +1846,41 @@ fn choose_device_path(
             "EMMC-LAB DEVICE PICKER",
             title,
             vec![
-                (
-                    "Visible".to_string(),
-                    visible_devices.len().to_string(),
-                ),
+                ("Visible".to_string(), visible_devices.len().to_string()),
                 (
                     "Mode".to_string(),
-                    if show_all { "all devices" } else { "preferred only" }.to_string(),
+                    if show_all {
+                        "all devices"
+                    } else {
+                        "preferred only"
+                    }
+                    .to_string(),
                 ),
             ],
             &[
-                SelectorColumn { header: "Path", min: 18, max: 28, align_right: false },
-                SelectorColumn { header: "Kind", min: 10, max: 12, align_right: false },
-                SelectorColumn { header: "Size", min: 10, max: 18, align_right: false },
+                SelectorColumn {
+                    header: "Path",
+                    min: 18,
+                    max: 28,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Kind",
+                    min: 10,
+                    max: 12,
+                    align_right: false,
+                },
+                SelectorColumn {
+                    header: "Size",
+                    min: 10,
+                    max: 18,
+                    align_right: false,
+                },
             ],
             &items,
             0,
-        )? else {
+        )?
+        else {
             return Ok(None);
         };
         if choice < visible_devices.len() {
@@ -1735,8 +1943,9 @@ fn preferred_raw_device_path() -> Option<PathBuf> {
 
 fn default_target_path(mode: &TargetMode) -> PathBuf {
     match mode {
-        TargetMode::RawDevice => preferred_raw_device_path()
-            .unwrap_or_else(|| PathBuf::from("/dev/mmcblk0")),
+        TargetMode::RawDevice => {
+            preferred_raw_device_path().unwrap_or_else(|| PathBuf::from("/dev/mmcblk0"))
+        }
         TargetMode::FileBased => PathBuf::from("/tmp/emmc-lab.bin"),
     }
 }
@@ -2242,6 +2451,60 @@ fn pause() -> Result<()> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(())
+}
+
+impl Spinner {
+    fn start(label: &str) -> Self {
+        if unsafe { libc::isatty(libc::STDERR_FILENO) } != 1 {
+            return Self {
+                stop: Arc::new(AtomicBool::new(true)),
+                handle: None,
+            };
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&stop);
+        let label_text = label.to_string();
+        let clear_width = label_text.chars().count() + 3;
+        let handle = thread::spawn(move || {
+            let frames = ['|', '/', '-', '\\'];
+            let mut index = 0usize;
+            while !signal.load(Ordering::Relaxed) {
+                eprint!("\r{} {}", label_text, frames[index % frames.len()]);
+                let _ = io::stderr().flush();
+                index = index.wrapping_add(1);
+                thread::sleep(Duration::from_millis(100));
+            }
+            eprint!("\r{blank}\r", blank = " ".repeat(clear_width));
+            let _ = io::stderr().flush();
+        });
+        Self {
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    fn finish(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        self.finish();
+    }
+}
+
+fn with_spinner<T, F>(label: &str, op: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    let mut spinner = Spinner::start(label);
+    let result = op();
+    spinner.finish();
+    result
 }
 
 struct RawTerminalGuard {
