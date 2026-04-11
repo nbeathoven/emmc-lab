@@ -156,7 +156,10 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
         match choice {
             0 => run_workload_flow(paths, &mut last_profile)?,
             1 => diagnostics_flow(paths)?,
-            2 => health_flow(paths)?,
+            2 => {
+                health_flow(paths)?;
+                pause()?;
+            }
             3 => reports_flow(paths)?,
             4 => {
                 settings_flow(paths)?;
