@@ -2,6 +2,15 @@
 
 All notable changes to `emmc-lab` are documented in this file.
 
+## v0.2.4 - 2026-04-12
+
+- made shared tables and the live monitor respect the active terminal width with an 80-column fallback when dimensions cannot be queried
+- switched truncation sentinels to `…` so clipped paths and long values stay visibly truncated over narrow SSH sessions
+- added `--color=auto|always|never` support while continuing to disable ANSI output when `NO_COLOR` is set or stdout is not a TTY
+- added inline invalid-choice feedback and direct numeric row selection for managed menus so bad input no longer looks like a hang
+- echoed accepted wizard defaults and typed answers back to the operator before advancing to the next prompt
+- reflowed the live monitor after `SIGWINCH` and moved deep-trace fallback notices to stderr so redirected stdout stays clean
+
 ## v0.2.3 - 2026-04-06
 
 - added a one-sector wizard preset for exact-count logical-sector read and write runs

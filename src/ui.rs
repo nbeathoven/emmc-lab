@@ -4,7 +4,23 @@ use crate::system::{AppPaths, CapabilityReport, DeviceInfo, DoctorReport, System
 use std::cmp::min;
 use std::cmp::Reverse;
 use std::env;
+use std::ffi::CStr;
 use std::fmt::Write as _;
+use std::sync::atomic::{AtomicU8, Ordering};
+
+const DEFAULT_TERMINAL_WIDTH: usize = 80;
+const DEFAULT_TERMINAL_HEIGHT: usize = 40;
+const ELLIPSIS: char = '…';
+
+static COLOR_POLICY: AtomicU8 = AtomicU8::new(ColorPolicy::Auto as u8);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum ColorPolicy {
+    Auto = 0,
+    Always = 1,
+    Never = 2,
+}
 
 #[derive(Clone, Copy)]
 enum Align {
@@ -24,6 +40,8 @@ struct Ui {
     width: usize,
     height: usize,
     color: bool,
+    host: String,
+    runtime_env: String,
 }
 
 pub struct SelectorColumn<'a> {
@@ -46,36 +64,49 @@ impl Ui {
                     .ok()
                     .and_then(|value| value.parse::<usize>().ok())
             })
-            .unwrap_or(100)
-            .clamp(72, 160);
+            .unwrap_or(DEFAULT_TERMINAL_WIDTH)
+            .clamp(24, 160);
         let height = stdout_height()
             .or_else(|| {
                 env::var("LINES")
                     .ok()
                     .and_then(|value| value.parse::<usize>().ok())
             })
-            .unwrap_or(40)
+            .unwrap_or(DEFAULT_TERMINAL_HEIGHT)
             .clamp(20, 80);
         let no_color = env::var_os("NO_COLOR").is_some();
         let term = env::var("TERM").unwrap_or_default();
-        let color = !no_color
-            && !term.is_empty()
-            && term != "dumb"
-            && unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 };
+        let stdout_tty = unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 };
+        let color = resolve_color_enabled(no_color, &term, stdout_tty);
+        let host = detect_hostname();
+        let runtime_env =
+            if env::var_os("SSH_CONNECTION").is_some() || env::var_os("SSH_TTY").is_some() {
+                "ssh"
+            } else {
+                "local"
+            }
+            .to_string();
         Self {
             width,
             height,
             color,
+            host,
+            runtime_env,
         }
     }
 
     fn banner(&self, title: &str) -> String {
         let mut out = String::new();
         let utility = format!("emmc-lab v{}", env!("CARGO_PKG_VERSION"));
-        let line_width = title.len().max(utility.len()).max(12);
+        let header = format!(
+            "App {}  Host {}  Env {}  Term {}x{}",
+            utility, self.host, self.runtime_env, self.width, self.height
+        );
+        let screen = format!("Screen {}", sanitize_inline(title));
+        let line_width = visible_width(&header).max(visible_width(&screen)).max(24);
         let line = "=".repeat(min(self.width, line_width));
-        let _ = writeln!(&mut out, "{}", self.paint(&utility, "1;33"));
-        let _ = writeln!(&mut out, "{}", self.paint(title, "1;36"));
+        let _ = writeln!(&mut out, "{}", self.paint(&header, "1"));
+        let _ = writeln!(&mut out, "{}", self.paint(&screen, "1;36"));
         let _ = writeln!(&mut out, "{}", self.paint(&line, "36"));
         out
     }
@@ -91,6 +122,30 @@ impl Ui {
 
     fn note(&self, label: &str, value: &str) -> String {
         format!("{} {}\n", self.paint(label, "1;33"), sanitize_inline(value))
+    }
+
+    fn details_panel(&self, title: &str, body: &str) -> String {
+        let mut out = self.section(title);
+        let _ = writeln!(&mut out, "{}", body.trim());
+        out
+    }
+
+    fn footer(&self, keys: &str) -> String {
+        let mut out = self.section("Footer");
+        let _ = writeln!(&mut out, "{}", sanitize_inline(keys));
+        out
+    }
+
+    fn operator_context(&self, path: &str, scope: &str, risk: &str, enter: &str) -> String {
+        self.kv_table(
+            "Context",
+            &[
+                ("Path".to_string(), sanitize_inline(path)),
+                ("Scope".to_string(), sanitize_inline(scope)),
+                ("Risk".to_string(), sanitize_inline(risk)),
+                ("Enter".to_string(), sanitize_inline(enter)),
+            ],
+        )
     }
 
     fn flow(&self, sections: &[String]) -> String {
@@ -198,23 +253,19 @@ impl Ui {
     }
 
     fn fit_width(&self, columns: &[Column<'_>], widths: &mut [usize]) {
-        let mut total = self.table_width(widths.len(), widths);
-        while total > self.width {
-            let Some((index, _)) = widths
-                .iter()
-                .enumerate()
-                .filter(|(index, width)| **width > columns[*index].min)
-                .max_by_key(|(_, width)| **width)
-            else {
-                break;
-            };
-            widths[index] -= 1;
-            total -= 1;
+        if widths.is_empty() {
+            return;
         }
-    }
-
-    fn table_width(&self, column_count: usize, widths: &[usize]) -> usize {
-        widths.iter().sum::<usize>() + (column_count * 3) + 1
+        let budget = self
+            .width
+            .saturating_sub((widths.len() * 3).saturating_add(1))
+            .max(widths.len());
+        let desired = widths.to_vec();
+        let minimum = columns
+            .iter()
+            .map(|column| column.min.max(1))
+            .collect::<Vec<_>>();
+        shrink_widths_to_budget(widths, &desired, &minimum, budget);
     }
 
     fn border(&self, widths: &[usize]) -> String {
@@ -289,6 +340,18 @@ impl Ui {
 pub fn render_session_summary(record: &SessionRecord) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB SESSION SUMMARY");
+    out.push_str(&ui.pair(
+        ui.operator_context(
+            "Reports / Session Summary",
+            "saved session review",
+            "read-only",
+            "not used on this screen",
+        ),
+        ui.details_panel(
+            "Details",
+            "Overview metadata is shown first, then performance, reliability, diagnostics, and notes.",
+        ),
+    ));
     let mode = if record.run_summary.is_some() {
         "test-run"
     } else if record.diagnostics.is_some() {
@@ -931,14 +994,29 @@ pub fn render_selector_screen(
 ) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner(title);
-    if !breadcrumb.is_empty() {
-        out.push_str(&ui.note("Path:", breadcrumb));
-    }
-
+    let scope = if title.contains("REPORT") {
+        "saved session selection"
+    } else if title.contains("WORKLOAD") {
+        "workload selection"
+    } else if title.contains("DIAGNOSTIC") {
+        "diagnostic selection"
+    } else {
+        "menu selection"
+    };
+    let context_panel = ui.operator_context(
+        if breadcrumb.is_empty() {
+            "-"
+        } else {
+            breadcrumb
+        },
+        scope,
+        "read-only until a workflow is opened",
+        "open the highlighted row",
+    );
     let summary_panel = if summary_rows.is_empty() {
         String::new()
     } else {
-        ui.kv_table("Context", summary_rows)
+        ui.kv_table("Summary", summary_rows)
     };
 
     let row_cells = rows
@@ -946,7 +1024,7 @@ pub fn render_selector_screen(
         .enumerate()
         .map(|(index, row)| {
             let marker = if index == selected { ">" } else { " " };
-            let mut cells = vec![marker.to_string()];
+            let mut cells = vec![marker.to_string(), (index + 1).to_string()];
             cells.extend(row.cells.clone());
             cells
         })
@@ -957,6 +1035,12 @@ pub fn render_selector_screen(
         max: 1,
         align: Align::Left,
     }];
+    selector_columns.push(Column {
+        header: "#",
+        min: 1,
+        max: 3,
+        align: Align::Right,
+    });
     selector_columns.extend(columns.iter().map(|column| Column {
         header: column.header,
         min: column.min,
@@ -968,18 +1052,39 @@ pub fn render_selector_screen(
         },
     }));
     let list_panel = ui.table("Select", &selector_columns, &row_cells);
-    out.push_str(&ui.pair(list_panel, summary_panel));
-
-    if let Some(current) = rows.get(selected) {
-        out.push_str(&ui.note("Detail:", &current.detail));
-    }
-    out.push_str(&ui.note("Keys:", footer));
+    let details_panel = rows
+        .get(selected)
+        .map(|current| {
+            ui.details_panel(
+                "Details",
+                &format!(
+                    "{}\n\nNext:\nPress Enter to open the highlighted row.\nPress Esc to return without making changes.",
+                    current.detail
+                ),
+            )
+        })
+        .unwrap_or_default();
+    let right_panel = ui.flow(&[context_panel, summary_panel, details_panel]);
+    out.push_str(&ui.pair(list_panel, right_panel));
+    out.push_str(&ui.footer(footer));
     out
 }
 
 pub fn render_health_report(report: &HealthReport) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB HEALTH");
+    out.push_str(&ui.pair(
+        ui.operator_context(
+            "Device Health",
+            "selected block device",
+            "read-only",
+            "not used on this screen",
+        ),
+        ui.details_panel(
+            "Details",
+            "Health output combines host context, eMMC telemetry, and capability checks. Missing mmc-utils support stays visible.",
+        ),
+    ));
     let system_rows = system_rows(&report.system);
     let system_panel = ui.kv_table("System", &system_rows);
     let emmc_rows = vec![
@@ -1031,6 +1136,12 @@ pub fn render_live_monitor(
     // on shorter SSH terminal windows instead of scrolling off the screen.
     let compact = ui.height <= 44;
     let medium = ui.height <= 60;
+    let context_panel = ui.operator_context(
+        "Diagnostics / Live Monitor",
+        "live procfs monitor",
+        "read-only best-effort monitor",
+        "not used during refresh; q quits",
+    );
     let overview_rows = vec![
         ("Updated".to_string(), report.ended_at.to_rfc3339()),
         (
@@ -1048,7 +1159,6 @@ pub fn render_live_monitor(
                 report.device_totals.len()
             ),
         ),
-        ("Controls".to_string(), "q quit".to_string()),
     ];
     let note_rows = vec![
         (
@@ -1088,10 +1198,8 @@ pub fn render_live_monitor(
             fmt_bytes(report.process_excess_storage_write_bytes),
         ),
     ];
-    out.push_str(&ui.pair(
-        ui.kv_table("Monitor", &overview_rows),
-        ui.kv_table("Notes", &note_rows),
-    ));
+    out.push_str(&ui.pair(context_panel, ui.kv_table("Monitor", &overview_rows)));
+    out.push_str(&ui.kv_table("Notes", &note_rows));
 
     let process_limit = live_process_limit(ui.width, ui.height);
     let process_rows = report
@@ -1189,6 +1297,7 @@ pub fn render_live_monitor(
             "Attribution:",
             "best-effort procfs monitor; logical and storage bytes remain separate",
         ));
+        out.push_str(&ui.footer("q quit the monitor"));
         return out;
     }
 
@@ -1453,12 +1562,25 @@ pub fn render_live_monitor(
         "Attribution:",
         "best-effort procfs monitor; logical and storage bytes remain separate; run with sudo for fuller process attribution",
     ));
+    out.push_str(&ui.footer("q quit the monitor"));
     out
 }
 
 pub fn render_doctor_report(report: &DoctorReport) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB DOCTOR");
+    out.push_str(&ui.pair(
+        ui.operator_context(
+            "Settings / Doctor",
+            "environment validation",
+            "read-only",
+            "not used on this screen",
+        ),
+        ui.details_panel(
+            "Details",
+            "Doctor keeps capability checks and visible devices together so operators can validate the environment before running tests.",
+        ),
+    ));
     let generated = vec![("Generated".to_string(), report.generated_at.to_rfc3339())];
     let run_panel = ui.kv_table("Run", &generated);
     let check_rows = report
@@ -1532,6 +1654,18 @@ pub fn render_settings(
 ) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB SETTINGS");
+    out.push_str(&ui.pair(
+        ui.operator_context(
+            "Settings",
+            "local environment facts",
+            "read-only",
+            "not used on this screen",
+        ),
+        ui.details_panel(
+            "Details",
+            "Settings shows stable paths, current host facts, and capability status without changing device state.",
+        ),
+    ));
     let path_rows = vec![
         (
             "Profiles".to_string(),
@@ -1560,6 +1694,18 @@ pub fn render_settings(
 pub fn render_device_list(devices: &[DeviceInfo]) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB DEVICES");
+    out.push_str(&ui.pair(
+        ui.operator_context(
+            "Settings / Devices",
+            "device inventory",
+            "read-only",
+            "not used on this screen",
+        ),
+        ui.details_panel(
+            "Details",
+            "Device list is ordered for operator review. Use the health workflow or run wizard to act on one of these targets.",
+        ),
+    ));
     let rows = devices.iter().map(device_row).collect::<Vec<_>>();
     out.push_str(&ui.table("Visible Devices", &device_columns(), &rows));
     out
@@ -1827,17 +1973,93 @@ fn stdout_height() -> Option<usize> {
     }
 }
 
+pub fn set_color_policy(policy: ColorPolicy) {
+    COLOR_POLICY.store(policy as u8, Ordering::Relaxed);
+}
+
+fn current_color_policy() -> ColorPolicy {
+    match COLOR_POLICY.load(Ordering::Relaxed) {
+        value if value == ColorPolicy::Always as u8 => ColorPolicy::Always,
+        value if value == ColorPolicy::Never as u8 => ColorPolicy::Never,
+        _ => ColorPolicy::Auto,
+    }
+}
+
+fn resolve_color_enabled(no_color: bool, term: &str, stdout_tty: bool) -> bool {
+    if no_color {
+        return false;
+    }
+    match current_color_policy() {
+        ColorPolicy::Always => true,
+        ColorPolicy::Never => false,
+        ColorPolicy::Auto => !term.is_empty() && term != "dumb" && stdout_tty,
+    }
+}
+
 fn truncate_text(value: &str, width: usize) -> String {
     let len = value.chars().count();
     if len <= width {
         return value.to_string();
     }
-    if width <= 3 {
-        return value.chars().take(width).collect();
+    if width == 0 {
+        return String::new();
     }
-    let mut out = value.chars().take(width - 3).collect::<String>();
-    out.push_str("...");
+    if width == 1 {
+        return ELLIPSIS.to_string();
+    }
+    let mut out = value.chars().take(width - 1).collect::<String>();
+    out.push(ELLIPSIS);
     out
+}
+
+fn shrink_widths_to_budget(
+    widths: &mut [usize],
+    desired: &[usize],
+    minimum: &[usize],
+    budget: usize,
+) {
+    if widths.is_empty() {
+        return;
+    }
+
+    let total = desired.iter().sum::<usize>();
+    if total == 0 {
+        for width in widths.iter_mut() {
+            *width = 1;
+        }
+        return;
+    }
+    if total <= budget {
+        widths.copy_from_slice(desired);
+        return;
+    }
+
+    for ((width, desired_width), min_width) in
+        widths.iter_mut().zip(desired.iter()).zip(minimum.iter())
+    {
+        let scaled = desired_width.saturating_mul(budget) / total;
+        *width = scaled.max(*min_width);
+    }
+
+    let mut total_width = widths.iter().sum::<usize>();
+    while total_width > budget {
+        let Some((index, _)) = widths
+            .iter()
+            .enumerate()
+            .filter(|(index, width)| **width > minimum[*index])
+            .max_by_key(|(index, width)| (**width, desired[*index]))
+        else {
+            break;
+        };
+        widths[index] -= 1;
+        total_width -= 1;
+    }
+
+    if total_width > budget && minimum.iter().any(|min_width| *min_width > 1) {
+        let relaxed_minimum = vec![1; widths.len()];
+        shrink_widths_to_budget(widths, desired, &relaxed_minimum, budget);
+        return;
+    }
 }
 
 fn sanitize_inline(value: &str) -> String {
@@ -1923,13 +2145,37 @@ fn fmt_us(value: u64) -> String {
     format!("{value} us")
 }
 
+fn detect_hostname() -> String {
+    if let Some(host) = env::var("HOSTNAME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return host;
+    }
+    let mut buffer = [0_i8; 256];
+    let rc = unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len()) };
+    if rc == 0 {
+        let host = unsafe { CStr::from_ptr(buffer.as_ptr()) }
+            .to_string_lossy()
+            .trim()
+            .to_string();
+        if !host.is_empty() {
+            return host;
+        }
+    }
+    "-".to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{truncate_text, visible_width, Align, Column, Ui};
+    use super::{
+        resolve_color_enabled, set_color_policy, shrink_widths_to_budget, truncate_text,
+        visible_width, Align, ColorPolicy, Column, Ui,
+    };
 
     #[test]
-    fn truncates_with_ascii_ellipsis() {
-        assert_eq!(truncate_text("abcdefgh", 6), "abc...");
+    fn truncates_with_unicode_ellipsis() {
+        assert_eq!(truncate_text("abcdefgh", 6), "abcde…");
     }
 
     #[test]
@@ -1938,6 +2184,8 @@ mod tests {
             width: 72,
             height: 40,
             color: false,
+            host: "-".to_string(),
+            runtime_env: "local".to_string(),
         };
         let rendered = ui.table(
             "Test",
@@ -1967,7 +2215,7 @@ mod tests {
                 "abcdefghijklmnopqrstuvwxyz".to_string(),
             ]],
         );
-        let widest = rendered.lines().map(str::len).max().unwrap_or(0);
+        let widest = rendered.lines().map(visible_width).max().unwrap_or(0);
         assert!(widest <= 72);
     }
 
@@ -1977,17 +2225,40 @@ mod tests {
     }
 
     #[test]
+    fn color_policy_respects_no_color_overrides() {
+        set_color_policy(ColorPolicy::Always);
+        assert!(!resolve_color_enabled(true, "xterm-256color", true));
+        set_color_policy(ColorPolicy::Never);
+        assert!(!resolve_color_enabled(false, "xterm-256color", true));
+        set_color_policy(ColorPolicy::Auto);
+        assert!(!resolve_color_enabled(false, "dumb", true));
+        assert!(resolve_color_enabled(false, "xterm-256color", true));
+    }
+
+    #[test]
+    fn shrinks_widths_below_nominal_minimum_when_terminal_is_narrow() {
+        let mut widths = vec![20, 20, 20, 20];
+        let desired = widths.clone();
+        let minimum = vec![8, 8, 8, 8];
+        shrink_widths_to_budget(&mut widths, &desired, &minimum, 20);
+        assert_eq!(widths.iter().sum::<usize>(), 20);
+        assert!(widths.iter().all(|width| *width >= 1));
+    }
+
+    #[test]
     fn joins_panels_horizontally_when_they_fit() {
         let ui = Ui {
             width: 120,
             height: 40,
             color: false,
+            host: "-".to_string(),
+            runtime_env: "local".to_string(),
         };
         let left = ui.kv_table("Left", &[("A".to_string(), "1".to_string())]);
         let right = ui.kv_table("Right", &[("B".to_string(), "2".to_string())]);
         let joined = ui.pair(left.clone(), right.clone());
         assert!(joined.contains("Left"));
         assert!(joined.contains("Right"));
-        assert!(!joined.starts_with(&format!("{}{}", left, right)));
+        assert_ne!(joined, format!("{}{}", left, right));
     }
 }

@@ -1,8 +1,9 @@
 use crate::app;
 use crate::report::ExportFormat;
 use crate::system::AppPaths;
+use crate::ui::{set_color_policy, ColorPolicy};
 use anyhow::{anyhow, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -12,8 +13,17 @@ use std::path::PathBuf;
     about = "eMMC performance, endurance, health, and I/O diagnostics"
 )]
 struct Cli {
+    #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
+    color: ColorMode,
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ColorMode {
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Debug, Subcommand)]
@@ -71,6 +81,11 @@ enum DiagCommand {
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    set_color_policy(match cli.color {
+        ColorMode::Auto => ColorPolicy::Auto,
+        ColorMode::Always => ColorPolicy::Always,
+        ColorMode::Never => ColorPolicy::Never,
+    });
     let paths = AppPaths::discover()?;
     match cli.command {
         None => app::run_menu(&paths),
