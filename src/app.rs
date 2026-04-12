@@ -29,6 +29,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::mem::MaybeUninit;
 use std::os::unix::ffi::OsStrExt;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -80,7 +81,9 @@ enum MenuKey {
     Escape,
     Quit,
     Digit(char),
+    Char(char),
     Backspace,
+    Resize,
 }
 
 static RESIZE_FLAG: AtomicBool = AtomicBool::new(false);
@@ -516,32 +519,6 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     WizardInput::Cancel => return Ok(None),
                 }
             }
-            2 => {
-                match prompt_menu_default_help(
-                    "Workload [1=randread, 2=randwrite, 3=randrw, 4=read, 5=write]",
-                    workload_choice(&profile.workload.test_type),
-                    &["1", "2", "3", "4", "5"],
-                    Some(
-                        "randread and randwrite pick random offsets, read and write scan sequentially, and randrw mixes both.",
-                    ),
-                )? {
-                    WizardInput::Value(value) => {
-                        profile.workload.test_type = match value.as_str() {
-                            "1" => WorkloadType::RandRead,
-                            "2" => WorkloadType::RandWrite,
-                            "3" => WorkloadType::RandRw,
-                            "4" => WorkloadType::Read,
-                            "5" => WorkloadType::Write,
-                            _ => unreachable!(),
-                        };
-                    }
-                    WizardInput::Back => {
-                        step -= 1;
-                        continue;
-                    }
-                    WizardInput::Cancel => return Ok(None),
-                }
-            }
             1 => match prompt_target_path(&profile.target.mode)? {
                 WizardInput::Value(path) => {
                     let normalized =
@@ -589,6 +566,32 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 }
                 WizardInput::Cancel => return Ok(None),
             },
+            2 => {
+                match prompt_menu_default_help(
+                    "Workload [1=randread, 2=randwrite, 3=randrw, 4=read, 5=write]",
+                    workload_choice(&profile.workload.test_type),
+                    &["1", "2", "3", "4", "5"],
+                    Some(
+                        "randread and randwrite pick random offsets, read and write scan sequentially, and randrw mixes both.",
+                    ),
+                )? {
+                    WizardInput::Value(value) => {
+                        profile.workload.test_type = match value.as_str() {
+                            "1" => WorkloadType::RandRead,
+                            "2" => WorkloadType::RandWrite,
+                            "3" => WorkloadType::RandRw,
+                            "4" => WorkloadType::Read,
+                            "5" => WorkloadType::Write,
+                            _ => unreachable!(),
+                        };
+                    }
+                    WizardInput::Back => {
+                        step -= 1;
+                        continue;
+                    }
+                    WizardInput::Cancel => return Ok(None),
+                }
+            }
             3 => match prompt_menu_default_help(
                 &format!(
                     "Range [1=all, 2=sectors, 3=bytes, 4=one sector] [{}]",
@@ -2721,68 +2724,98 @@ fn select_from_menu(
         );
     }
     let _terminal = RawTerminalGuard::new()?;
+    let _resize = ResizeSignalGuard::install();
     let mut selected = default.min(items.len().saturating_sub(1));
-    let mut numeric_input = String::new();
-    let mut status = selector_status(items.len(), &numeric_input, None);
+    let mut input_buffer = String::new();
+    let mut invalid_input = None::<String>;
+    let mut needs_redraw = true;
     loop {
-        let rows = items
-            .iter()
-            .map(|item| SelectorRow {
-                cells: item.columns.clone(),
-                detail: item.detail.clone(),
-            })
-            .collect::<Vec<_>>();
-        redraw_managed_screen(&render_selector_screen(
-            title,
-            breadcrumb,
-            &summary_rows,
-            columns,
-            &rows,
-            selected,
-            "Up/Down or j/k move  Type a number to jump  Enter open  Esc back  q quit  Ctrl-C terminate",
+        if needs_redraw {
+            let rows = items
+                .iter()
+                .map(|item| SelectorRow {
+                    cells: item.columns.clone(),
+                    detail: item.detail.clone(),
+                })
+                .collect::<Vec<_>>();
+            redraw_managed_screen(&render_selector_screen(
+                title,
+                breadcrumb,
+                &summary_rows,
+                columns,
+                &rows,
+                selected,
+                "Up/Down or j/k move  Type a number to jump  Enter open  Esc back  q quit  Ctrl-C terminate",
+            ))?;
+            needs_redraw = false;
+        }
+        rewrite_selector_status(&selector_status(
+            items.len(),
+            &input_buffer,
+            invalid_input.as_deref(),
         ))?;
-        rewrite_selector_status(&status)?;
         match read_menu_key()? {
             MenuKey::Up => {
-                numeric_input.clear();
-                status = selector_status(items.len(), &numeric_input, None);
+                input_buffer.clear();
+                invalid_input = None;
                 selected = selected.saturating_sub(1);
+                needs_redraw = true;
             }
             MenuKey::Down => {
-                numeric_input.clear();
-                status = selector_status(items.len(), &numeric_input, None);
+                input_buffer.clear();
+                invalid_input = None;
                 selected = (selected + 1).min(items.len().saturating_sub(1));
+                needs_redraw = true;
             }
             MenuKey::Enter => {
-                if numeric_input.is_empty() {
+                if input_buffer.is_empty() {
                     return Ok(Some(selected));
                 }
-                match numeric_input.parse::<usize>() {
-                    Ok(choice) if (1..=items.len()).contains(&choice) => {
-                        return Ok(Some(choice - 1))
-                    }
-                    _ => {
-                        numeric_input.clear();
-                        status =
-                            selector_status(items.len(), &numeric_input, Some("Invalid choice."));
-                        rewrite_selector_status(&status)?;
-                        continue;
+                match parse_selector_choice(&input_buffer, items.len()) {
+                    Ok(choice) => return Ok(Some(choice)),
+                    Err(_) => {
+                        invalid_input = Some(input_buffer.clone());
+                        input_buffer.clear();
+                        rewrite_selector_status(&selector_status(
+                            items.len(),
+                            &input_buffer,
+                            invalid_input.as_deref(),
+                        ))?;
                     }
                 }
             }
             MenuKey::Digit(digit) => {
-                numeric_input.push(digit);
-                status = selector_status(items.len(), &numeric_input, None);
-                rewrite_selector_status(&status)?;
-                continue;
+                invalid_input = None;
+                input_buffer.push(digit);
+                rewrite_selector_status(&selector_status(
+                    items.len(),
+                    &input_buffer,
+                    invalid_input.as_deref(),
+                ))?;
+            }
+            MenuKey::Char(ch) => {
+                invalid_input = None;
+                input_buffer.push(ch);
+                rewrite_selector_status(&selector_status(
+                    items.len(),
+                    &input_buffer,
+                    invalid_input.as_deref(),
+                ))?;
             }
             MenuKey::Backspace => {
-                numeric_input.pop();
-                status = selector_status(items.len(), &numeric_input, None);
-                rewrite_selector_status(&status)?;
-                continue;
+                invalid_input = None;
+                input_buffer.pop();
+                rewrite_selector_status(&selector_status(
+                    items.len(),
+                    &input_buffer,
+                    invalid_input.as_deref(),
+                ))?;
             }
             MenuKey::Escape | MenuKey::Quit => return Ok(None),
+            MenuKey::Resize => {
+                invalid_input = None;
+                needs_redraw = true;
+            }
         }
     }
 }
@@ -2842,10 +2875,13 @@ fn with_spinner<T, F>(label: &str, op: F) -> T
 where
     F: FnOnce() -> T,
 {
-    let mut spinner = Spinner::start(label);
-    let result = op();
-    spinner.finish();
-    result
+    let spinner = Spinner::start(label);
+    let result = panic::catch_unwind(AssertUnwindSafe(op));
+    drop(spinner);
+    match result {
+        Ok(value) => value,
+        Err(err) => panic::resume_unwind(err),
+    }
 }
 
 struct RawTerminalGuard {
@@ -2934,6 +2970,9 @@ fn poll_keypress_until(timeout: Duration) -> Result<Option<u8>> {
 fn read_menu_key() -> Result<MenuKey> {
     loop {
         let Some(byte) = poll_keypress_until(Duration::from_secs(60))? else {
+            if RESIZE_FLAG.swap(false, Ordering::Relaxed) {
+                return Ok(MenuKey::Resize);
+            }
             continue;
         };
         return match byte {
@@ -2941,34 +2980,41 @@ fn read_menu_key() -> Result<MenuKey> {
             b'k' | b'K' => Ok(MenuKey::Up),
             b'j' | b'J' => Ok(MenuKey::Down),
             b'0'..=b'9' => Ok(MenuKey::Digit(byte as char)),
-            8 | 127 => Ok(MenuKey::Backspace),
             b'q' | b'Q' | 3 => Ok(MenuKey::Quit),
+            8 | 127 => Ok(MenuKey::Backspace),
             27 => parse_escape_sequence(),
+            b' '..=b'~' => Ok(MenuKey::Char(byte as char)),
             _ => continue,
         };
     }
 }
 
-fn selector_status(item_count: usize, numeric_input: &str, error: Option<&str>) -> String {
-    if let Some(error) = error {
+fn selector_status(item_count: usize, input: &str, invalid_input: Option<&str>) -> String {
+    if let Some(invalid_input) = invalid_input {
         return format!(
-            "{} Enter a number between 1 and {}: {}",
-            error, item_count, numeric_input
+            "  Invalid choice {:?}. Enter 1-{}:",
+            invalid_input, item_count
         );
     }
-    if numeric_input.is_empty() {
-        return format!("Type 1-{} to jump directly, or use arrows/j/k.", item_count);
+    if input.is_empty() {
+        return format!("  Choice [1-{}]: ", item_count);
     }
-    format!(
-        "Choice {}. Press Enter to open, Backspace to edit.",
-        numeric_input
-    )
+    format!("  Choice [1-{}]: {}", item_count, input)
 }
 
 fn rewrite_selector_status(status: &str) -> Result<()> {
     write!(io::stdout(), "\r\u{1b}[K{}", status)?;
     io::stdout().flush()?;
     Ok(())
+}
+
+fn parse_selector_choice(input: &str, item_count: usize) -> Result<usize> {
+    let choice = input.trim().parse::<usize>()?;
+    if (1..=item_count).contains(&choice) {
+        Ok(choice - 1)
+    } else {
+        bail!("choice out of range");
+    }
 }
 
 struct ResizeSignalGuard {
@@ -3018,7 +3064,7 @@ mod tests {
     use super::{
         adjusted_block_size, block_size_floor, device_rank, format_bytes, format_grouped_u64,
         is_auxiliary_device, is_single_sector_target, normalize_block_size,
-        normalize_file_target_path, parse_yes_no,
+        normalize_file_target_path, parse_selector_choice, parse_yes_no,
     };
     use crate::profile::{AddressingMode, Profile, TargetMode};
     use crate::system::DeviceInfo;
@@ -3110,5 +3156,14 @@ mod tests {
         let normalized =
             normalize_file_target_path(&TargetMode::FileBased, dir.path().to_path_buf());
         assert_eq!(normalized, dir.path().join("emmc-lab.bin"));
+    }
+
+    #[test]
+    fn parses_selector_choices() {
+        assert_eq!(parse_selector_choice("3", 7).expect("valid"), 2);
+        assert!(parse_selector_choice("9", 7).is_err());
+        assert!(parse_selector_choice("0", 7).is_err());
+        assert!(parse_selector_choice("abc", 7).is_err());
+        assert!(parse_selector_choice("", 7).is_err());
     }
 }

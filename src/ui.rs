@@ -36,6 +36,7 @@ struct Column<'a> {
     align: Align,
 }
 
+#[derive(Clone)]
 struct Ui {
     width: usize,
     height: usize,
@@ -44,16 +45,16 @@ struct Ui {
     runtime_env: String,
 }
 
-pub struct SelectorColumn<'a> {
-    pub header: &'a str,
-    pub min: usize,
-    pub max: usize,
-    pub align_right: bool,
+pub(crate) struct SelectorColumn<'a> {
+    pub(crate) header: &'a str,
+    pub(crate) min: usize,
+    pub(crate) max: usize,
+    pub(crate) align_right: bool,
 }
 
-pub struct SelectorRow {
-    pub cells: Vec<String>,
-    pub detail: String,
+pub(crate) struct SelectorRow {
+    pub(crate) cells: Vec<String>,
+    pub(crate) detail: String,
 }
 
 impl Ui {
@@ -77,7 +78,7 @@ impl Ui {
         let no_color = env::var_os("NO_COLOR").is_some();
         let term = env::var("TERM").unwrap_or_default();
         let stdout_tty = unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 };
-        let color = resolve_color_enabled(no_color, &term, stdout_tty);
+        let color = resolve_color_enabled(current_color_policy(), no_color, &term, stdout_tty);
         let host = detect_hostname();
         let runtime_env =
             if env::var_os("SSH_CONNECTION").is_some() || env::var_os("SSH_TTY").is_some() {
@@ -145,6 +146,7 @@ impl Ui {
                 ("Risk".to_string(), sanitize_inline(risk)),
                 ("Enter".to_string(), sanitize_inline(enter)),
             ],
+            None,
         )
     }
 
@@ -157,12 +159,29 @@ impl Ui {
             .join("")
     }
 
-    fn pair(&self, left: String, right: String) -> String {
-        self.side_by_side(&left, &right)
-            .unwrap_or_else(|| self.flow(&[left, right]))
+    fn pair<F, G>(&self, left: F, right: G) -> String
+    where
+        F: Fn(&Ui) -> String,
+        G: Fn(&Ui) -> String,
+    {
+        let half = (self.width.saturating_sub(2)) / 2;
+        let constrained = self.constrained(half);
+        let left_half = left(&constrained);
+        let right_half = right(&constrained);
+        if let Some(joined) = self.side_by_side(&left_half, &right_half) {
+            return joined;
+        }
+
+        self.flow(&[left(self), right(self)])
     }
 
-    fn kv_table(&self, title: &str, rows: &[(String, String)]) -> String {
+    fn constrained(&self, width: usize) -> Self {
+        let mut constrained = self.clone();
+        constrained.width = constrained.width.min(width.max(1));
+        constrained
+    }
+
+    fn kv_table(&self, title: &str, rows: &[(String, String)], max_width: Option<usize>) -> String {
         let key_width = rows
             .iter()
             .map(|(key, _)| key.chars().count())
@@ -188,10 +207,16 @@ impl Ui {
             .iter()
             .map(|(key, value)| vec![key.clone(), value.clone()])
             .collect::<Vec<_>>();
-        self.table(title, &columns, &table_rows)
+        self.table(title, &columns, &table_rows, max_width)
     }
 
-    fn table(&self, title: &str, columns: &[Column<'_>], rows: &[Vec<String>]) -> String {
+    fn table(
+        &self,
+        title: &str,
+        columns: &[Column<'_>],
+        rows: &[Vec<String>],
+        max_width: Option<usize>,
+    ) -> String {
         let mut out = self.section(title);
         if columns.is_empty() {
             return out;
@@ -216,7 +241,11 @@ impl Ui {
             })
             .collect::<Vec<_>>();
 
-        self.fit_width(columns, &mut widths);
+        self.fit_width(
+            columns,
+            &mut widths,
+            max_width.unwrap_or(self.width).min(self.width),
+        );
         let border = self.border(&widths);
         let _ = writeln!(&mut out, "{}", border);
         let header = columns
@@ -252,12 +281,11 @@ impl Ui {
         out
     }
 
-    fn fit_width(&self, columns: &[Column<'_>], widths: &mut [usize]) {
+    fn fit_width(&self, columns: &[Column<'_>], widths: &mut [usize], max_width: usize) {
         if widths.is_empty() {
             return;
         }
-        let budget = self
-            .width
+        let budget = max_width
             .saturating_sub((widths.len() * 3).saturating_add(1))
             .max(widths.len());
         let desired = widths.to_vec();
@@ -337,20 +365,24 @@ impl Ui {
     }
 }
 
-pub fn render_session_summary(record: &SessionRecord) -> String {
+pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB SESSION SUMMARY");
     out.push_str(&ui.pair(
-        ui.operator_context(
-            "Reports / Session Summary",
-            "saved session review",
-            "read-only",
-            "not used on this screen",
-        ),
-        ui.details_panel(
-            "Details",
-            "Overview metadata is shown first, then performance, reliability, diagnostics, and notes.",
-        ),
+        |ui| {
+            ui.operator_context(
+                "Reports / Session Summary",
+                "saved session review",
+                "read-only",
+                "not used on this screen",
+            )
+        },
+        |ui| {
+            ui.details_panel(
+                "Details",
+                "Overview metadata is shown first, then performance, reliability, diagnostics, and notes.",
+            )
+        },
     ));
     let mode = if record.run_summary.is_some() {
         "test-run"
@@ -375,7 +407,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
     if let Some(profile) = &record.profile {
         session_rows.push(("Profile".to_string(), profile.name.clone()));
     }
-    let session_panel = ui.kv_table("Session", &session_rows);
+    let session_panel = ui.kv_table("Session", &session_rows, None);
 
     if let Some(run) = &record.run_summary {
         let run_rows = vec![
@@ -394,8 +426,10 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 ),
             ),
         ];
-        let run_meta_panel = ui.kv_table("Run Metadata", &run_rows);
-        out.push_str(&ui.pair(session_panel, run_meta_panel));
+        out.push_str(&ui.pair(
+            |ui| ui.kv_table("Session", &session_rows, Some(ui.width)),
+            |ui| ui.kv_table("Run Metadata", &run_rows, Some(ui.width)),
+        ));
 
         let run_table = vec![
             vec![
@@ -439,31 +473,6 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 fmt_us(run.write_latency.p999_us),
             ],
         ];
-        let run_perf_panel = ui.table(
-            "Run Performance",
-            &[
-                Column {
-                    header: "Metric",
-                    min: 14,
-                    max: 18,
-                    align: Align::Left,
-                },
-                Column {
-                    header: "Reads",
-                    min: 10,
-                    max: 18,
-                    align: Align::Right,
-                },
-                Column {
-                    header: "Writes",
-                    min: 10,
-                    max: 18,
-                    align: Align::Right,
-                },
-            ],
-            &run_table,
-        );
-
         let reliability_rows = vec![
             ("Retries".to_string(), run.retries.to_string()),
             (
@@ -481,8 +490,36 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 run.verify.unexpected_eof.to_string(),
             ),
         ];
-        let reliability_panel = ui.kv_table("Reliability", &reliability_rows);
-        out.push_str(&ui.pair(run_perf_panel, reliability_panel));
+        out.push_str(&ui.pair(
+            |ui| {
+                ui.table(
+                    "Run Performance",
+                    &[
+                        Column {
+                            header: "Metric",
+                            min: 14,
+                            max: 18,
+                            align: Align::Left,
+                        },
+                        Column {
+                            header: "Reads",
+                            min: 10,
+                            max: 18,
+                            align: Align::Right,
+                        },
+                        Column {
+                            header: "Writes",
+                            min: 10,
+                            max: 18,
+                            align: Align::Right,
+                        },
+                    ],
+                    &run_table,
+                    Some(ui.width),
+                )
+            },
+            |ui| ui.kv_table("Reliability", &reliability_rows, Some(ui.width)),
+        ));
         if let Some(first_failure) = &run.verify.first_failure {
             out.push_str(&ui.note(
                 "Verify failure:",
@@ -551,7 +588,10 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 fmt_bytes(diag.process_excess_storage_write_bytes),
             ),
         ];
-        out.push_str(&ui.pair(session_panel, ui.kv_table("Diagnostics", &diag_rows)));
+        out.push_str(&ui.pair(
+            |ui| ui.kv_table("Session", &session_rows, Some(ui.width)),
+            |ui| ui.kv_table("Diagnostics", &diag_rows, Some(ui.width)),
+        ));
     } else {
         out.push_str(&session_panel);
     }
@@ -612,7 +652,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     fmt_bytes(diag.process_excess_storage_write_bytes),
                 ),
             ];
-            out.push_str(&ui.kv_table("Diagnostics", &diag_rows));
+            out.push_str(&ui.kv_table("Diagnostics", &diag_rows, None));
         }
         out.push_str(&ui.note(
             "Attribution:",
@@ -623,7 +663,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
             out.push_str(&ui.note("Fallback:", message));
         }
 
-        let process_limit = row_limit(ui.width);
+        let process_limit = row_limit(ui.height);
         let process_rows = diag
             .top_processes
             .iter()
@@ -642,7 +682,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
             })
             .collect::<Vec<_>>();
         if !process_rows.is_empty() {
-            let processes_panel = ui.table(
+            let _processes_panel = ui.table(
                 "Top Processes",
                 &[
                     Column {
@@ -695,6 +735,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     },
                 ],
                 &process_rows,
+                None,
             );
 
             let path_rows = diag
@@ -711,7 +752,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     ]
                 })
                 .collect::<Vec<_>>();
-            let path_panel = ui.table(
+            let _path_panel = ui.table(
                 "Process Paths",
                 &[
                     Column {
@@ -746,14 +787,112 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     },
                 ],
                 &path_rows,
+                None,
             );
-            out.push_str(&ui.pair(processes_panel, path_panel));
+            out.push_str(&ui.pair(
+                |ui| {
+                    ui.table(
+                        "Top Processes",
+                        &[
+                            Column {
+                                header: "PID",
+                                min: 5,
+                                max: 7,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "User",
+                                min: 6,
+                                max: 12,
+                                align: Align::Left,
+                            },
+                            Column {
+                                header: "Command",
+                                min: 10,
+                                max: 18,
+                                align: Align::Left,
+                            },
+                            Column {
+                                header: "Log R/s",
+                                min: 10,
+                                max: 12,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Log W/s",
+                                min: 10,
+                                max: 12,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Store R/s",
+                                min: 10,
+                                max: 12,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Store W/s",
+                                min: 10,
+                                max: 12,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Share",
+                                min: 7,
+                                max: 8,
+                                align: Align::Right,
+                            },
+                        ],
+                        &process_rows,
+                        Some(ui.width),
+                    )
+                },
+                |ui| {
+                    ui.table(
+                        "Process Paths",
+                        &[
+                            Column {
+                                header: "PID",
+                                min: 5,
+                                max: 7,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Executable",
+                                min: 14,
+                                max: 28,
+                                align: Align::Left,
+                            },
+                            Column {
+                                header: "CWD",
+                                min: 14,
+                                max: 24,
+                                align: Align::Left,
+                            },
+                            Column {
+                                header: "Hottest File",
+                                min: 14,
+                                max: 28,
+                                align: Align::Left,
+                            },
+                            Column {
+                                header: "Hottest Dir",
+                                min: 14,
+                                max: 24,
+                                align: Align::Left,
+                            },
+                        ],
+                        &path_rows,
+                        Some(ui.width),
+                    )
+                },
+            ));
         }
 
         let file_rows = diag
             .top_files
             .iter()
-            .take(row_limit(ui.width))
+            .take(row_limit(ui.height))
             .map(|file| {
                 vec![
                     file.file_path.clone(),
@@ -823,13 +962,14 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     },
                 ],
                 &file_rows,
+                None,
             ));
         }
 
         let directory_rows = diag
             .top_directories
             .iter()
-            .take(row_limit(ui.width))
+            .take(row_limit(ui.height))
             .map(|dir| {
                 vec![
                     dir.directory_path.clone(),
@@ -880,6 +1020,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     },
                 ],
                 &directory_rows,
+                None,
             ));
         }
 
@@ -887,7 +1028,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
         sorted_devices.sort_by_key(|device| diagnostic_device_rank(&device.device, device));
         let device_rows = sorted_devices
             .iter()
-            .take(row_limit(ui.width))
+            .take(row_limit(ui.height))
             .map(|device| {
                 vec![
                     device.device.clone(),
@@ -941,6 +1082,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                     },
                 ],
                 &device_rows,
+                None,
             ));
         }
     }
@@ -968,7 +1110,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
                 ),
             ));
         }
-        out.push_str(&ui.kv_table("Health Snapshots", &health_rows));
+        out.push_str(&ui.kv_table("Health Snapshots", &health_rows, None));
     }
 
     if let Some(note) = &record.contamination_note {
@@ -983,7 +1125,7 @@ pub fn render_session_summary(record: &SessionRecord) -> String {
     out
 }
 
-pub fn render_selector_screen(
+pub(crate) fn render_selector_screen(
     title: &str,
     breadcrumb: &str,
     summary_rows: &[(String, String)],
@@ -1003,22 +1145,6 @@ pub fn render_selector_screen(
     } else {
         "menu selection"
     };
-    let context_panel = ui.operator_context(
-        if breadcrumb.is_empty() {
-            "-"
-        } else {
-            breadcrumb
-        },
-        scope,
-        "read-only until a workflow is opened",
-        "open the highlighted row",
-    );
-    let summary_panel = if summary_rows.is_empty() {
-        String::new()
-    } else {
-        ui.kv_table("Summary", summary_rows)
-    };
-
     let row_cells = rows
         .iter()
         .enumerate()
@@ -1051,42 +1177,61 @@ pub fn render_selector_screen(
             Align::Left
         },
     }));
-    let list_panel = ui.table("Select", &selector_columns, &row_cells);
-    let details_panel = rows
-        .get(selected)
-        .map(|current| {
-            ui.details_panel(
-                "Details",
-                &format!(
-                    "{}\n\nNext:\nPress Enter to open the highlighted row.\nPress Esc to return without making changes.",
-                    current.detail
+    out.push_str(&ui.pair(
+        |ui| ui.table("Select", &selector_columns, &row_cells, Some(ui.width)),
+        |ui| {
+            let details_panel = rows
+                .get(selected)
+                .map(|current| {
+                    ui.details_panel(
+                        "Details",
+                        &format!(
+                            "{}\n\nNext:\nPress Enter to open the highlighted row.\nPress Esc to return without making changes.",
+                            current.detail
+                        ),
+                    )
+                })
+                .unwrap_or_default();
+            ui.flow(&[
+                ui.operator_context(
+                    if breadcrumb.is_empty() { "-" } else { breadcrumb },
+                    scope,
+                    "read-only until a workflow is opened",
+                    "open the highlighted row",
                 ),
-            )
-        })
-        .unwrap_or_default();
-    let right_panel = ui.flow(&[context_panel, summary_panel, details_panel]);
-    out.push_str(&ui.pair(list_panel, right_panel));
+                if summary_rows.is_empty() {
+                    String::new()
+                } else {
+                    ui.kv_table("Summary", summary_rows, Some(ui.width))
+                },
+                details_panel,
+            ])
+        },
+    ));
     out.push_str(&ui.footer(footer));
     out
 }
 
-pub fn render_health_report(report: &HealthReport) -> String {
+pub(crate) fn render_health_report(report: &HealthReport) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB HEALTH");
     out.push_str(&ui.pair(
-        ui.operator_context(
-            "Device Health",
-            "selected block device",
-            "read-only",
-            "not used on this screen",
-        ),
-        ui.details_panel(
-            "Details",
-            "Health output combines host context, eMMC telemetry, and capability checks. Missing mmc-utils support stays visible.",
-        ),
+        |ui| {
+            ui.operator_context(
+                "Device Health",
+                "selected block device",
+                "read-only",
+                "not used on this screen",
+            )
+        },
+        |ui| {
+            ui.details_panel(
+                "Details",
+                "Health output combines host context, eMMC telemetry, and capability checks. Missing mmc-utils support stays visible.",
+            )
+        },
     ));
     let system_rows = system_rows(&report.system);
-    let system_panel = ui.kv_table("System", &system_rows);
     let emmc_rows = vec![
         (
             "Device".to_string(),
@@ -1113,8 +1258,10 @@ pub fn render_health_report(report: &HealthReport) -> String {
             opt_text(report.emmc.pre_eol_info.as_deref()),
         ),
     ];
-    let health_panel = ui.kv_table("eMMC Health", &emmc_rows);
-    out.push_str(&ui.pair(system_panel, health_panel));
+    out.push_str(&ui.pair(
+        |ui| ui.kv_table("System", &system_rows, Some(ui.width)),
+        |ui| ui.kv_table("eMMC Health", &emmc_rows, Some(ui.width)),
+    ));
     out.push_str(&ui.note("Note:", &report.emmc.note));
     if let Some(raw) = &report.emmc.raw_text {
         out.push_str(&ui.note(
@@ -1122,11 +1269,11 @@ pub fn render_health_report(report: &HealthReport) -> String {
             &truncate_text(raw, ui.width.saturating_sub(20)),
         ));
     }
-    out.push_str(&ui.kv_table("Capabilities", &capability_rows(&report.capabilities)));
+    out.push_str(&ui.kv_table("Capabilities", &capability_rows(&report.capabilities), None));
     out
 }
 
-pub fn render_live_monitor(
+pub(crate) fn render_live_monitor(
     report: &crate::diagnostics::DiagnosticReport,
     interval_ms: u64,
 ) -> String {
@@ -1136,12 +1283,6 @@ pub fn render_live_monitor(
     // on shorter SSH terminal windows instead of scrolling off the screen.
     let compact = ui.height <= 44;
     let medium = ui.height <= 60;
-    let context_panel = ui.operator_context(
-        "Diagnostics / Live Monitor",
-        "live procfs monitor",
-        "read-only best-effort monitor",
-        "not used during refresh; q quits",
-    );
     let overview_rows = vec![
         ("Updated".to_string(), report.ended_at.to_rfc3339()),
         (
@@ -1198,8 +1339,18 @@ pub fn render_live_monitor(
             fmt_bytes(report.process_excess_storage_write_bytes),
         ),
     ];
-    out.push_str(&ui.pair(context_panel, ui.kv_table("Monitor", &overview_rows)));
-    out.push_str(&ui.kv_table("Notes", &note_rows));
+    out.push_str(&ui.pair(
+        |ui| {
+            ui.operator_context(
+                "Diagnostics / Live Monitor",
+                "live procfs monitor",
+                "read-only best-effort monitor",
+                "not used during refresh; q quits",
+            )
+        },
+        |ui| ui.kv_table("Monitor", &overview_rows, Some(ui.width)),
+    ));
+    out.push_str(&ui.kv_table("Notes", &note_rows, None));
 
     let process_limit = live_process_limit(ui.width, ui.height);
     let process_rows = report
@@ -1275,6 +1426,7 @@ pub fn render_live_monitor(
                 },
             ],
             &process_rows,
+            None,
         )
     };
 
@@ -1346,6 +1498,7 @@ pub fn render_live_monitor(
                 },
             ],
             &device_rows,
+            None,
         )
     };
     let restricted_limit = if medium { 4 } else { 8 };
@@ -1394,6 +1547,7 @@ pub fn render_live_monitor(
                 },
             ],
             &restricted_rows,
+            None,
         )
     };
     let kernel_rows = report
@@ -1434,10 +1588,110 @@ pub fn render_live_monitor(
                 },
             ],
             &kernel_rows,
+            None,
         )
     };
     if !process_panel.is_empty() || !device_panel.is_empty() {
-        out.push_str(&ui.pair(process_panel, device_panel));
+        out.push_str(&ui.pair(
+            |ui| {
+                if process_rows.is_empty() {
+                    String::new()
+                } else {
+                    ui.table(
+                        "Top Processes",
+                        &[
+                            Column {
+                                header: "PID",
+                                min: 5,
+                                max: 7,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Command",
+                                min: 10,
+                                max: 20,
+                                align: Align::Left,
+                            },
+                            Column {
+                                header: "Log R/s",
+                                min: 10,
+                                max: 12,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Log W/s",
+                                min: 10,
+                                max: 12,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Store R/s",
+                                min: 10,
+                                max: 12,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Store W/s",
+                                min: 10,
+                                max: 12,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Store R",
+                                min: 10,
+                                max: 11,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Store W",
+                                min: 10,
+                                max: 11,
+                                align: Align::Right,
+                            },
+                        ],
+                        &process_rows,
+                        Some(ui.width),
+                    )
+                }
+            },
+            |ui| {
+                if device_rows.is_empty() {
+                    String::new()
+                } else {
+                    ui.table(
+                        "Devices",
+                        &[
+                            Column {
+                                header: "Device",
+                                min: 10,
+                                max: 14,
+                                align: Align::Left,
+                            },
+                            Column {
+                                header: "Reads",
+                                min: 7,
+                                max: 9,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "Writes",
+                                min: 7,
+                                max: 9,
+                                align: Align::Right,
+                            },
+                            Column {
+                                header: "InFlight",
+                                min: 8,
+                                max: 9,
+                                align: Align::Right,
+                            },
+                        ],
+                        &device_rows,
+                        Some(ui.width),
+                    )
+                }
+            },
+        ));
     }
     if !restricted_panel.is_empty() {
         out.push_str(&restricted_panel);
@@ -1490,6 +1744,7 @@ pub fn render_live_monitor(
                     },
                 ],
                 &path_rows,
+                None,
             ));
         }
     }
@@ -1554,6 +1809,7 @@ pub fn render_live_monitor(
                     },
                 ],
                 &file_rows,
+                None,
             ));
         }
     }
@@ -1566,23 +1822,26 @@ pub fn render_live_monitor(
     out
 }
 
-pub fn render_doctor_report(report: &DoctorReport) -> String {
+pub(crate) fn render_doctor_report(report: &DoctorReport) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB DOCTOR");
     out.push_str(&ui.pair(
-        ui.operator_context(
-            "Settings / Doctor",
-            "environment validation",
-            "read-only",
-            "not used on this screen",
-        ),
-        ui.details_panel(
-            "Details",
-            "Doctor keeps capability checks and visible devices together so operators can validate the environment before running tests.",
-        ),
+        |ui| {
+            ui.operator_context(
+                "Settings / Doctor",
+                "environment validation",
+                "read-only",
+                "not used on this screen",
+            )
+        },
+        |ui| {
+            ui.details_panel(
+                "Details",
+                "Doctor keeps capability checks and visible devices together so operators can validate the environment before running tests.",
+            )
+        },
     ));
     let generated = vec![("Generated".to_string(), report.generated_at.to_rfc3339())];
-    let run_panel = ui.kv_table("Run", &generated);
     let check_rows = report
         .checks
         .iter()
@@ -1598,8 +1857,16 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
             ]
         })
         .collect::<Vec<_>>();
-    let capabilities_panel = ui.kv_table("Capabilities", &capability_rows(&report.capabilities));
-    out.push_str(&ui.pair(run_panel, capabilities_panel));
+    out.push_str(&ui.pair(
+        |ui| ui.kv_table("Run", &generated, Some(ui.width)),
+        |ui| {
+            ui.kv_table(
+                "Capabilities",
+                &capability_rows(&report.capabilities),
+                Some(ui.width),
+            )
+        },
+    ));
     out.push_str(&ui.table(
         "Checks",
         &[
@@ -1623,17 +1890,18 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
             },
         ],
         &check_rows,
+        None,
     ));
 
     let visible_devices = primary_devices(&report.devices);
     let hidden_count = report.devices.len().saturating_sub(visible_devices.len());
     let device_rows = visible_devices
         .iter()
-        .take(row_limit(ui.width) + 2)
+        .take(row_limit(ui.height) + 2)
         .map(device_row)
         .collect::<Vec<_>>();
     if !device_rows.is_empty() {
-        out.push_str(&ui.table("Primary Devices", &device_columns(), &device_rows));
+        out.push_str(&ui.table("Primary Devices", &device_columns(), &device_rows, None));
     }
     if hidden_count > 0 {
         out.push_str(&ui.note(
@@ -1647,7 +1915,7 @@ pub fn render_doctor_report(report: &DoctorReport) -> String {
     out
 }
 
-pub fn render_settings(
+pub(crate) fn render_settings(
     paths: &AppPaths,
     system: &SystemSnapshot,
     caps: &CapabilityReport,
@@ -1655,16 +1923,20 @@ pub fn render_settings(
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB SETTINGS");
     out.push_str(&ui.pair(
-        ui.operator_context(
-            "Settings",
-            "local environment facts",
-            "read-only",
-            "not used on this screen",
-        ),
-        ui.details_panel(
-            "Details",
-            "Settings shows stable paths, current host facts, and capability status without changing device state.",
-        ),
+        |ui| {
+            ui.operator_context(
+                "Settings",
+                "local environment facts",
+                "read-only",
+                "not used on this screen",
+            )
+        },
+        |ui| {
+            ui.details_panel(
+                "Details",
+                "Settings shows stable paths, current host facts, and capability status without changing device state.",
+            )
+        },
     ));
     let path_rows = vec![
         (
@@ -1684,30 +1956,35 @@ pub fn render_settings(
             paths.samples_dir.display().to_string(),
         ),
     ];
-    let paths_panel = ui.kv_table("Paths", &path_rows);
-    let system_panel = ui.kv_table("System", &system_rows(system));
-    out.push_str(&ui.pair(paths_panel, system_panel));
-    out.push_str(&ui.kv_table("Capabilities", &capability_rows(caps)));
+    out.push_str(&ui.pair(
+        |ui| ui.kv_table("Paths", &path_rows, Some(ui.width)),
+        |ui| ui.kv_table("System", &system_rows(system), Some(ui.width)),
+    ));
+    out.push_str(&ui.kv_table("Capabilities", &capability_rows(caps), None));
     out
 }
 
-pub fn render_device_list(devices: &[DeviceInfo]) -> String {
+pub(crate) fn render_device_list(devices: &[DeviceInfo]) -> String {
     let ui = Ui::detect();
     let mut out = ui.banner("EMMC-LAB DEVICES");
     out.push_str(&ui.pair(
-        ui.operator_context(
-            "Settings / Devices",
-            "device inventory",
-            "read-only",
-            "not used on this screen",
-        ),
-        ui.details_panel(
-            "Details",
-            "Device list is ordered for operator review. Use the health workflow or run wizard to act on one of these targets.",
-        ),
+        |ui| {
+            ui.operator_context(
+                "Settings / Devices",
+                "device inventory",
+                "read-only",
+                "not used on this screen",
+            )
+        },
+        |ui| {
+            ui.details_panel(
+                "Details",
+                "Device list is ordered for operator review. Use the health workflow or run wizard to act on one of these targets.",
+            )
+        },
     ));
     let rows = devices.iter().map(device_row).collect::<Vec<_>>();
-    out.push_str(&ui.table("Visible Devices", &device_columns(), &rows));
+    out.push_str(&ui.table("Visible Devices", &device_columns(), &rows, None));
     out
 }
 
@@ -1896,44 +2173,38 @@ fn diagnostic_device_rank(
     (family, Reverse(activity), device.to_string())
 }
 
-fn row_limit(width: usize) -> usize {
-    if width < 90 {
-        3
-    } else if width < 120 {
-        5
-    } else {
-        7
-    }
+fn row_limit(height: usize) -> usize {
+    height.saturating_sub(12).max(3)
 }
 
-fn live_process_limit(width: usize, height: usize) -> usize {
-    let width_limit = row_limit(width);
+fn live_process_limit(_width: usize, height: usize) -> usize {
+    let height_limit = row_limit(height);
     if height <= 44 {
-        width_limit.min(4)
+        height_limit.min(4)
     } else if height <= 60 {
-        width_limit.min(5)
+        height_limit.min(5)
     } else {
-        width_limit
+        height_limit
     }
 }
 
-fn live_device_limit(width: usize, height: usize) -> usize {
-    let width_limit = row_limit(width);
+fn live_device_limit(_width: usize, height: usize) -> usize {
+    let height_limit = row_limit(height);
     if height <= 44 {
-        width_limit.min(3)
+        height_limit.min(3)
     } else if height <= 60 {
-        width_limit.min(4)
+        height_limit.min(4)
     } else {
-        width_limit
+        height_limit
     }
 }
 
-fn live_file_limit(width: usize, height: usize) -> usize {
-    let width_limit = row_limit(width);
+fn live_file_limit(_width: usize, height: usize) -> usize {
+    let height_limit = row_limit(height);
     if height <= 56 {
-        width_limit.min(4)
+        height_limit.min(4)
     } else {
-        width_limit
+        height_limit
     }
 }
 
@@ -1973,7 +2244,7 @@ fn stdout_height() -> Option<usize> {
     }
 }
 
-pub fn set_color_policy(policy: ColorPolicy) {
+pub(crate) fn set_color_policy(policy: ColorPolicy) {
     COLOR_POLICY.store(policy as u8, Ordering::Relaxed);
 }
 
@@ -1985,14 +2256,16 @@ fn current_color_policy() -> ColorPolicy {
     }
 }
 
-fn resolve_color_enabled(no_color: bool, term: &str, stdout_tty: bool) -> bool {
-    if no_color {
-        return false;
-    }
-    match current_color_policy() {
+fn resolve_color_enabled(
+    policy: ColorPolicy,
+    no_color: bool,
+    term: &str,
+    stdout_tty: bool,
+) -> bool {
+    match policy {
         ColorPolicy::Always => true,
         ColorPolicy::Never => false,
-        ColorPolicy::Auto => !term.is_empty() && term != "dumb" && stdout_tty,
+        ColorPolicy::Auto => !no_color && !term.is_empty() && term != "dumb" && stdout_tty,
     }
 }
 
@@ -2214,6 +2487,7 @@ mod tests {
                 "abcdefghijklmnopqrstuvwxyz".to_string(),
                 "abcdefghijklmnopqrstuvwxyz".to_string(),
             ]],
+            None,
         );
         let widest = rendered.lines().map(visible_width).max().unwrap_or(0);
         assert!(widest <= 72);
@@ -2227,12 +2501,38 @@ mod tests {
     #[test]
     fn color_policy_respects_no_color_overrides() {
         set_color_policy(ColorPolicy::Always);
-        assert!(!resolve_color_enabled(true, "xterm-256color", true));
+        assert!(resolve_color_enabled(
+            ColorPolicy::Always,
+            true,
+            "xterm-256color",
+            false
+        ));
         set_color_policy(ColorPolicy::Never);
-        assert!(!resolve_color_enabled(false, "xterm-256color", true));
+        assert!(!resolve_color_enabled(
+            ColorPolicy::Never,
+            false,
+            "xterm-256color",
+            true
+        ));
         set_color_policy(ColorPolicy::Auto);
-        assert!(!resolve_color_enabled(false, "dumb", true));
-        assert!(resolve_color_enabled(false, "xterm-256color", true));
+        assert!(!resolve_color_enabled(
+            ColorPolicy::Auto,
+            false,
+            "dumb",
+            true
+        ));
+        assert!(!resolve_color_enabled(
+            ColorPolicy::Auto,
+            true,
+            "xterm-256color",
+            true
+        ));
+        assert!(resolve_color_enabled(
+            ColorPolicy::Auto,
+            false,
+            "xterm-256color",
+            true
+        ));
     }
 
     #[test]
@@ -2254,11 +2554,26 @@ mod tests {
             host: "-".to_string(),
             runtime_env: "local".to_string(),
         };
-        let left = ui.kv_table("Left", &[("A".to_string(), "1".to_string())]);
-        let right = ui.kv_table("Right", &[("B".to_string(), "2".to_string())]);
-        let joined = ui.pair(left.clone(), right.clone());
+        let joined = ui.pair(
+            |ui| {
+                ui.kv_table(
+                    "Left",
+                    &[("A".to_string(), "1".to_string())],
+                    Some(ui.width),
+                )
+            },
+            |ui| {
+                ui.kv_table(
+                    "Right",
+                    &[("B".to_string(), "2".to_string())],
+                    Some(ui.width),
+                )
+            },
+        );
         assert!(joined.contains("Left"));
         assert!(joined.contains("Right"));
-        assert_ne!(joined, format!("{}{}", left, right));
+        assert!(joined
+            .lines()
+            .any(|line| line.contains("Left") && line.contains("Right")));
     }
 }
