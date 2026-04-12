@@ -2425,7 +2425,7 @@ fn detect_hostname() -> String {
     {
         return host;
     }
-    let mut buffer = [0_i8; 256];
+    let mut buffer = [0 as libc::c_char; 256];
     let rc = unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len()) };
     if rc == 0 {
         let host = unsafe { CStr::from_ptr(buffer.as_ptr()) }
