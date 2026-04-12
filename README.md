@@ -9,7 +9,7 @@
 - JSON, CSV, and HTML reporting
 - an SSH-friendly interactive menu plus direct automation commands
 
-Current release: `v0.2.3`
+Current release: `v0.2.4`
 
 License: [MIT](LICENSE)
 
@@ -20,7 +20,13 @@ License: [MIT](LICENSE)
 1. Stress and characterize eMMC or file-backed storage with reproducible workloads.
 2. Show which processes, files, directories, and devices are using I/O on the system.
 
-It is designed as one application, not a loose bundle of scripts. The default command opens a plain numbered CLI menu that works over SSH without a full-screen TUI.
+It is designed as one application, not a loose bundle of scripts. The default command opens an SSH-first managed terminal console with a stable operator frame:
+
+- header with app version, host, environment, and current screen
+- clear path/context blocks plus a current-item detail pane
+- explicit key hints repeated in the footer
+- read-only and state-changing actions described in plain language before execution
+- side-by-side panels when width allows, with stacked fallback on smaller terminals
 
 ## How It Works
 
@@ -103,6 +109,14 @@ The interactive menu now groups workload entry under `Run Workload`, with:
 - `Guided Custom Run`
 - `Saved Profiles`
 - `Repeat Last Run`
+
+The managed console uses a small fixed key vocabulary throughout:
+
+- `Up/Down` or `j/k`: move selection
+- `Enter`: open the highlighted item
+- `Esc`: go back without applying changes
+- `q`: quit from selector screens
+- `Ctrl-C`: immediate termination
 
 Run the wizard directly:
 
@@ -304,7 +318,7 @@ If an optional feature is unavailable, `emmc-lab` reports that clearly and falls
 
 ## Versioning and Releases
 
-- Crate version: `0.2.3`
+- Crate version: `0.2.4`
 - License: `MIT`
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - GitHub releases: [Releases](https://github.com/nbeathoven/emmc-lab/releases)
