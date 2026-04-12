@@ -79,6 +79,14 @@ enum MenuKey {
     Enter,
     Escape,
     Quit,
+    Digit(char),
+    Backspace,
+}
+
+static RESIZE_FLAG: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn handle_sigwinch(_: libc::c_int) {
+    RESIZE_FLAG.store(true, Ordering::Relaxed);
 }
 
 pub fn run_menu(paths: &AppPaths) -> Result<()> {
@@ -87,31 +95,31 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
         let items = vec![
             MenuItem {
                 columns: vec!["Run Workload".to_string(), "presets, wizard, saved, repeat".to_string()],
-                detail: "Open workload entry points including quick presets, guided custom runs, saved profiles, and repeat-last-run.".to_string(),
+                detail: "Scope: file targets or raw devices. Risk: varies by selected workflow and can become destructive on raw-device write runs. Open workload entry points including quick presets, guided custom runs, saved profiles, and repeat-last-run.".to_string(),
             },
             MenuItem {
                 columns: vec!["Diagnostics".to_string(), "live monitor, capture, deep trace".to_string()],
-                detail: "Launch the live monitor, save a timed capture, or try deep trace with fallback guidance.".to_string(),
+                detail: "Scope: local diagnostics. Risk: read-only sampling unless you choose deeper tracing support. Launch the live monitor, save a timed capture, or try deep trace with fallback guidance.".to_string(),
             },
             MenuItem {
                 columns: vec!["Device Health".to_string(), "mmc health and host snapshot".to_string()],
-                detail: "Inspect eMMC health and system context for a selected block device.".to_string(),
+                detail: "Scope: selected block device. Risk: read-only. Inspect eMMC health and system context for a selected block device.".to_string(),
             },
             MenuItem {
                 columns: vec!["Reports".to_string(), "view or export sessions".to_string()],
-                detail: "Browse saved sessions and export JSON, CSV, or HTML reports.".to_string(),
+                detail: "Scope: saved session data. Risk: viewing is read-only, export writes local files, and delete removes saved data. Browse saved sessions and export JSON, CSV, or HTML reports.".to_string(),
             },
             MenuItem {
                 columns: vec!["Settings".to_string(), "paths and capabilities".to_string()],
-                detail: "Show application paths, system defaults, and capability checks.".to_string(),
+                detail: "Scope: local environment. Risk: read-only. Show application paths, system defaults, and capability checks.".to_string(),
             },
             MenuItem {
                 columns: vec!["Help".to_string(), "commands and workflow notes".to_string()],
-                detail: "Show built-in CLI usage examples and workflow notes.".to_string(),
+                detail: "Scope: operator guidance. Risk: read-only. Show built-in CLI usage examples and workflow notes.".to_string(),
             },
             MenuItem {
                 columns: vec!["Exit".to_string(), "leave emmc-lab".to_string()],
-                detail: "Return to the shell.".to_string(),
+                detail: "Scope: current console session. Risk: none. Return to the shell.".to_string(),
             },
         ];
         let Some(choice) = select_from_menu(
@@ -181,19 +189,19 @@ fn run_workload_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Re
         let items = vec![
             MenuItem {
                 columns: vec!["Quick Presets".to_string(), "named common workloads".to_string()],
-                detail: "Choose from built-in file, partition, raw-device, focused logical-range, and diagnostics-oriented presets.".to_string(),
+                detail: "Scope: workload templates. Risk: depends on the chosen preset; raw-device write presets are destructive. Choose from built-in file, partition, raw-device, focused logical-range, and diagnostics-oriented presets.".to_string(),
             },
             MenuItem {
                 columns: vec!["Guided Custom Run".to_string(), "full wizard".to_string()],
-                detail: "Open the guided wizard and build a custom profile from scratch.".to_string(),
+                detail: "Scope: full workload definition. Risk: depends on your target mode and test type. Open the guided wizard and build a custom profile from scratch.".to_string(),
             },
             MenuItem {
                 columns: vec!["Saved Profiles".to_string(), "reload existing YAML".to_string()],
-                detail: "Browse saved YAML profiles and run or edit them.".to_string(),
+                detail: "Scope: saved YAML profiles. Risk: running a selected profile may write to its target. Browse saved YAML profiles and run or edit them.".to_string(),
             },
             MenuItem {
                 columns: vec!["Repeat Last Run".to_string(), "rerun current session profile".to_string()],
-                detail: "Run the most recent workload profile again without re-entering fields.".to_string(),
+                detail: "Scope: most recent workload profile. Risk: identical to the previous run profile, including destructive raw-device writes if that was the last action. Run the most recent workload profile again without re-entering fields.".to_string(),
             },
             MenuItem {
                 columns: vec!["Back".to_string(), "return to main menu".to_string()],
@@ -385,18 +393,26 @@ pub fn run_diag_monitor(duration_seconds: u64, interval_ms: u64) -> Result<()> {
     }
     let interval = Duration::from_millis(interval_ms.max(250));
     let _terminal = RawTerminalGuard::new()?;
+    let _resize = ResizeSignalGuard::install();
     let mut sampler = LiveSamplerState::new(None)?;
-    let first_report = sampler.sample_once()?;
-    redraw_live_monitor(&first_report, interval_ms)?;
+    let mut last_report = sampler.sample_once()?;
+    redraw_live_monitor(&last_report, interval_ms)?;
     loop {
+        if RESIZE_FLAG.swap(false, Ordering::Relaxed) {
+            redraw_live_monitor(&last_report, interval_ms)?;
+        }
         if let Some(key) = poll_keypress_until(interval)? {
             if matches!(key, b'q' | b'Q' | 3) {
                 break;
             }
         }
-        let report = sampler.sample_once()?;
-        redraw_live_monitor(&report, interval_ms)?;
-        if duration_seconds > 0 && report.duration_seconds >= duration_seconds {
+        if RESIZE_FLAG.swap(false, Ordering::Relaxed) {
+            redraw_live_monitor(&last_report, interval_ms)?;
+            continue;
+        }
+        last_report = sampler.sample_once()?;
+        redraw_live_monitor(&last_report, interval_ms)?;
+        if duration_seconds > 0 && last_report.duration_seconds >= duration_seconds {
             break;
         }
     }
@@ -419,8 +435,19 @@ pub fn run_diag_trace(
     })?;
     record.diagnostics = Some(report);
     let path = with_spinner("Saving session", || save_session(paths, &record))?;
-    println!("Saved session: {}", path.display());
-    println!("{}", terminal_summary(&record));
+    if let Some(message) = record
+        .diagnostics
+        .as_ref()
+        .and_then(|diag| diag.fallback_message.as_deref())
+    {
+        eprintln!("{}", message);
+    }
+    if unsafe { libc::isatty(libc::STDOUT_FILENO) } == 1 {
+        println!("Saved session: {}", path.display());
+        println!("{}", terminal_summary(&record));
+    } else {
+        eprintln!("Saved session: {}", path.display());
+    }
     Ok(session_id)
 }
 
@@ -950,7 +977,10 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 Some(&profile.name),
                 Some("Name used when saving the YAML profile for later reuse."),
             )? {
-                WizardInput::Value(value) => profile.name = value,
+                WizardInput::Value(value) => {
+                    println!("  Using: {}", value);
+                    profile.name = value;
+                }
                 WizardInput::Back => {
                     step -= 1;
                     continue;
@@ -1382,15 +1412,15 @@ fn diagnostics_flow(paths: &AppPaths) -> Result<()> {
         let items = vec![
             MenuItem {
                 columns: vec!["Live Monitor".to_string(), "managed live screen".to_string()],
-                detail: "Watch active I/O in real time with a stable screen and 1-second refresh.".to_string(),
+                detail: "Scope: live host activity. Risk: read-only best-effort monitor. Watch active I/O in real time with a stable screen and 1-second refresh.".to_string(),
             },
             MenuItem {
                 columns: vec!["Timed Capture".to_string(), "saved sampler session".to_string()],
-                detail: "Run a procfs sampler for a fixed duration and save the results as a session.".to_string(),
+                detail: "Scope: local diagnostics session. Risk: read-only sampling plus local session writes. Run a procfs sampler for a fixed duration and save the results as a session.".to_string(),
             },
             MenuItem {
                 columns: vec!["Deep Trace".to_string(), "best-effort trace path".to_string()],
-                detail: "Attempt deep tracing and explain fallback behavior when tracing support is unavailable.".to_string(),
+                detail: "Scope: deeper diagnostic tracing. Risk: read-only, but capability-limited and may require elevated access. Attempt deep tracing and explain fallback behavior when tracing support is unavailable.".to_string(),
             },
             MenuItem {
                 columns: vec!["Back".to_string(), "return to main menu".to_string()],
@@ -1544,29 +1574,29 @@ fn reports_flow(paths: &AppPaths) -> Result<()> {
                     "screen report".to_string(),
                 ],
                 detail: format!(
-                    "Render the saved session {} directly in the terminal.",
+                    "Scope: saved session {}. Risk: read-only. Render the saved session directly in the terminal.",
                     session.session_id
                 ),
             },
             MenuItem {
                 columns: vec!["Export JSON".to_string(), "machine-readable".to_string()],
-                detail: "Write a JSON export under the exports directory.".to_string(),
+                detail: "Scope: saved session export. Risk: writes a local JSON file under the exports directory.".to_string(),
             },
             MenuItem {
                 columns: vec!["Export CSV".to_string(), "spreadsheet-friendly".to_string()],
-                detail: "Write CSV exports for summary, intervals, and processes where present."
+                detail: "Scope: saved session export. Risk: writes local CSV files for summary, intervals, and processes where present."
                     .to_string(),
             },
             MenuItem {
                 columns: vec!["Export HTML".to_string(), "shareable report".to_string()],
-                detail: "Write an HTML report under the exports directory.".to_string(),
+                detail: "Scope: saved session export. Risk: writes a local HTML report under the exports directory.".to_string(),
             },
             MenuItem {
                 columns: vec![
                     "Delete session".to_string(),
                     "remove saved data".to_string(),
                 ],
-                detail: "Delete this saved session directory and all exported data inside it."
+                detail: "Scope: selected saved session. Risk: destructive local delete of the session directory and exported data inside it."
                     .to_string(),
             },
             MenuItem {
@@ -1803,7 +1833,14 @@ fn session_id() -> String {
 }
 
 fn prompt_string_default(label: &str, default: Option<&str>) -> Result<WizardInput<String>> {
-    prompt_string_default_help(label, default, None)
+    match prompt_string_default_help(label, default, None)? {
+        WizardInput::Value(value) => {
+            println!("  Using: {}", value);
+            Ok(WizardInput::Value(value))
+        }
+        WizardInput::Back => Ok(WizardInput::Back),
+        WizardInput::Cancel => Ok(WizardInput::Cancel),
+    }
 }
 
 fn prompt_string_default_help(
@@ -1866,9 +1903,12 @@ fn prompt_menu_default_help(
     loop {
         match prompt_string_default_help(label, Some(default), help)? {
             WizardInput::Value(value) if allowed.contains(&value.as_str()) => {
+                println!("  Using: {}", value);
                 return Ok(WizardInput::Value(value));
             }
-            WizardInput::Value(_) => println!("Invalid choice"),
+            WizardInput::Value(_) => {
+                println!("Invalid choice. Enter one of: {}", allowed.join(", "));
+            }
             WizardInput::Back => return Ok(WizardInput::Back),
             WizardInput::Cancel => return Ok(WizardInput::Cancel),
         }
@@ -1888,7 +1928,8 @@ fn prompt_u64_in_range(
         match prompt_string_default_help(&prompt_label, Some(&default_text), help)? {
             WizardInput::Value(value) => match value.parse::<u64>() {
                 Ok(parsed) if parsed >= min && parsed <= max => {
-                    return Ok(WizardInput::Value(parsed))
+                    println!("  Using: {}", parsed);
+                    return Ok(WizardInput::Value(parsed));
                 }
                 Ok(_) => println!("Value must be between {min} and {max}"),
                 Err(err) => println!("Invalid value: {}", err),
@@ -1936,7 +1977,10 @@ fn prompt_bool_default(
     loop {
         match prompt_string_default_help(&format!("{label} [y/n]"), Some(default_text), help)? {
             WizardInput::Value(value) => match parse_yes_no(&value) {
-                Ok(parsed) => return Ok(WizardInput::Value(parsed)),
+                Ok(parsed) => {
+                    println!("  Using: {}", if parsed { "y" } else { "n" });
+                    return Ok(WizardInput::Value(parsed));
+                }
                 Err(_) => println!("Expected y or n"),
             },
             WizardInput::Back => return Ok(WizardInput::Back),
@@ -2672,10 +2716,14 @@ fn select_from_menu(
     if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1
         || unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1
     {
-        bail!("interactive selector requires a terminal");
+        bail!(
+            "interactive selector requires a terminal; use a real TTY or run a direct command such as `emmc-lab doctor`, `emmc-lab run --profile ...`, or `emmc-lab report --session ...`"
+        );
     }
     let _terminal = RawTerminalGuard::new()?;
     let mut selected = default.min(items.len().saturating_sub(1));
+    let mut numeric_input = String::new();
+    let mut status = selector_status(items.len(), &numeric_input, None);
     loop {
         let rows = items
             .iter()
@@ -2691,16 +2739,49 @@ fn select_from_menu(
             columns,
             &rows,
             selected,
-            "Up/Down Move  Enter Select  Esc Back  Q Quit",
+            "Up/Down or j/k move  Type a number to jump  Enter open  Esc back  q quit  Ctrl-C terminate",
         ))?;
+        rewrite_selector_status(&status)?;
         match read_menu_key()? {
             MenuKey::Up => {
+                numeric_input.clear();
+                status = selector_status(items.len(), &numeric_input, None);
                 selected = selected.saturating_sub(1);
             }
             MenuKey::Down => {
+                numeric_input.clear();
+                status = selector_status(items.len(), &numeric_input, None);
                 selected = (selected + 1).min(items.len().saturating_sub(1));
             }
-            MenuKey::Enter => return Ok(Some(selected)),
+            MenuKey::Enter => {
+                if numeric_input.is_empty() {
+                    return Ok(Some(selected));
+                }
+                match numeric_input.parse::<usize>() {
+                    Ok(choice) if (1..=items.len()).contains(&choice) => {
+                        return Ok(Some(choice - 1))
+                    }
+                    _ => {
+                        numeric_input.clear();
+                        status =
+                            selector_status(items.len(), &numeric_input, Some("Invalid choice."));
+                        rewrite_selector_status(&status)?;
+                        continue;
+                    }
+                }
+            }
+            MenuKey::Digit(digit) => {
+                numeric_input.push(digit);
+                status = selector_status(items.len(), &numeric_input, None);
+                rewrite_selector_status(&status)?;
+                continue;
+            }
+            MenuKey::Backspace => {
+                numeric_input.pop();
+                status = selector_status(items.len(), &numeric_input, None);
+                rewrite_selector_status(&status)?;
+                continue;
+            }
             MenuKey::Escape | MenuKey::Quit => return Ok(None),
         }
     }
@@ -2832,6 +2913,10 @@ fn poll_keypress_until(timeout: Duration) -> Result<Option<u8>> {
     };
     let rc = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
     if rc < 0 {
+        let err = io::Error::last_os_error();
+        if err.kind() == io::ErrorKind::Interrupted {
+            return Ok(None);
+        }
         bail!("failed to poll stdin");
     }
     if rc == 0 || pollfd.revents & libc::POLLIN == 0 {
@@ -2855,10 +2940,59 @@ fn read_menu_key() -> Result<MenuKey> {
             b'\r' | b'\n' => Ok(MenuKey::Enter),
             b'k' | b'K' => Ok(MenuKey::Up),
             b'j' | b'J' => Ok(MenuKey::Down),
+            b'0'..=b'9' => Ok(MenuKey::Digit(byte as char)),
+            8 | 127 => Ok(MenuKey::Backspace),
             b'q' | b'Q' | 3 => Ok(MenuKey::Quit),
             27 => parse_escape_sequence(),
             _ => continue,
         };
+    }
+}
+
+fn selector_status(item_count: usize, numeric_input: &str, error: Option<&str>) -> String {
+    if let Some(error) = error {
+        return format!(
+            "{} Enter a number between 1 and {}: {}",
+            error, item_count, numeric_input
+        );
+    }
+    if numeric_input.is_empty() {
+        return format!("Type 1-{} to jump directly, or use arrows/j/k.", item_count);
+    }
+    format!(
+        "Choice {}. Press Enter to open, Backspace to edit.",
+        numeric_input
+    )
+}
+
+fn rewrite_selector_status(status: &str) -> Result<()> {
+    write!(io::stdout(), "\r\u{1b}[K{}", status)?;
+    io::stdout().flush()?;
+    Ok(())
+}
+
+struct ResizeSignalGuard {
+    previous: libc::sighandler_t,
+}
+
+impl ResizeSignalGuard {
+    fn install() -> Self {
+        RESIZE_FLAG.store(false, Ordering::Relaxed);
+        let previous = unsafe {
+            libc::signal(
+                libc::SIGWINCH,
+                handle_sigwinch as *const () as libc::sighandler_t,
+            )
+        };
+        Self { previous }
+    }
+}
+
+impl Drop for ResizeSignalGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::signal(libc::SIGWINCH, self.previous);
+        }
     }
 }
 
