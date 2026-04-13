@@ -80,9 +80,6 @@ enum MenuKey {
     Enter,
     Escape,
     Quit,
-    Digit(char),
-    Char(char),
-    Backspace,
     Resize,
 }
 
@@ -2726,96 +2723,34 @@ fn select_from_menu(
     let _terminal = RawTerminalGuard::new()?;
     let _resize = ResizeSignalGuard::install();
     let mut selected = default.min(items.len().saturating_sub(1));
-    let mut input_buffer = String::new();
-    let mut invalid_input = None::<String>;
-    let mut needs_redraw = true;
     loop {
-        if needs_redraw {
-            let rows = items
-                .iter()
-                .map(|item| SelectorRow {
-                    cells: item.columns.clone(),
-                    detail: item.detail.clone(),
-                })
-                .collect::<Vec<_>>();
-            redraw_managed_screen(&render_selector_screen(
-                title,
-                breadcrumb,
-                &summary_rows,
-                columns,
-                &rows,
-                selected,
-                "Up/Down or j/k move  Type a number to jump  Enter open  Esc back  q quit  Ctrl-C terminate",
-            ))?;
-            needs_redraw = false;
-        }
-        rewrite_selector_status(&selector_status(
-            items.len(),
-            &input_buffer,
-            invalid_input.as_deref(),
+        let rows = items
+            .iter()
+            .map(|item| SelectorRow {
+                cells: item.columns.clone(),
+                detail: item.detail.clone(),
+            })
+            .collect::<Vec<_>>();
+        redraw_managed_screen(&render_selector_screen(
+            title,
+            breadcrumb,
+            &summary_rows,
+            columns,
+            &rows,
+            selected,
+            "Up/Down or j/k move  Enter open  Esc back  q quit  Ctrl-C terminate",
         ))?;
+        rewrite_selector_status(selector_status())?;
         match read_menu_key()? {
             MenuKey::Up => {
-                input_buffer.clear();
-                invalid_input = None;
                 selected = selected.saturating_sub(1);
-                needs_redraw = true;
             }
             MenuKey::Down => {
-                input_buffer.clear();
-                invalid_input = None;
                 selected = (selected + 1).min(items.len().saturating_sub(1));
-                needs_redraw = true;
             }
-            MenuKey::Enter => {
-                if input_buffer.is_empty() {
-                    return Ok(Some(selected));
-                }
-                match parse_selector_choice(&input_buffer, items.len()) {
-                    Ok(choice) => return Ok(Some(choice)),
-                    Err(_) => {
-                        invalid_input = Some(input_buffer.clone());
-                        input_buffer.clear();
-                        rewrite_selector_status(&selector_status(
-                            items.len(),
-                            &input_buffer,
-                            invalid_input.as_deref(),
-                        ))?;
-                    }
-                }
-            }
-            MenuKey::Digit(digit) => {
-                invalid_input = None;
-                input_buffer.push(digit);
-                rewrite_selector_status(&selector_status(
-                    items.len(),
-                    &input_buffer,
-                    invalid_input.as_deref(),
-                ))?;
-            }
-            MenuKey::Char(ch) => {
-                invalid_input = None;
-                input_buffer.push(ch);
-                rewrite_selector_status(&selector_status(
-                    items.len(),
-                    &input_buffer,
-                    invalid_input.as_deref(),
-                ))?;
-            }
-            MenuKey::Backspace => {
-                invalid_input = None;
-                input_buffer.pop();
-                rewrite_selector_status(&selector_status(
-                    items.len(),
-                    &input_buffer,
-                    invalid_input.as_deref(),
-                ))?;
-            }
+            MenuKey::Enter => return Ok(Some(selected)),
             MenuKey::Escape | MenuKey::Quit => return Ok(None),
-            MenuKey::Resize => {
-                invalid_input = None;
-                needs_redraw = true;
-            }
+            MenuKey::Resize => continue,
         }
     }
 }
@@ -2979,42 +2914,21 @@ fn read_menu_key() -> Result<MenuKey> {
             b'\r' | b'\n' => Ok(MenuKey::Enter),
             b'k' | b'K' => Ok(MenuKey::Up),
             b'j' | b'J' => Ok(MenuKey::Down),
-            b'0'..=b'9' => Ok(MenuKey::Digit(byte as char)),
             b'q' | b'Q' | 3 => Ok(MenuKey::Quit),
-            8 | 127 => Ok(MenuKey::Backspace),
             27 => parse_escape_sequence(),
-            b' '..=b'~' => Ok(MenuKey::Char(byte as char)),
             _ => continue,
         };
     }
 }
 
-fn selector_status(item_count: usize, input: &str, invalid_input: Option<&str>) -> String {
-    if let Some(invalid_input) = invalid_input {
-        return format!(
-            "  Invalid choice {:?}. Enter 1-{}:",
-            invalid_input, item_count
-        );
-    }
-    if input.is_empty() {
-        return format!("  Choice [1-{}]: ", item_count);
-    }
-    format!("  Choice [1-{}]: {}", item_count, input)
+fn selector_status() -> &'static str {
+    "  Use Up/Down or j/k to move. Press Enter to open."
 }
 
 fn rewrite_selector_status(status: &str) -> Result<()> {
     write!(io::stdout(), "\r\u{1b}[K{}", status)?;
     io::stdout().flush()?;
     Ok(())
-}
-
-fn parse_selector_choice(input: &str, item_count: usize) -> Result<usize> {
-    let choice = input.trim().parse::<usize>()?;
-    if (1..=item_count).contains(&choice) {
-        Ok(choice - 1)
-    } else {
-        bail!("choice out of range");
-    }
 }
 
 struct ResizeSignalGuard {
@@ -3043,13 +2957,13 @@ impl Drop for ResizeSignalGuard {
 }
 
 fn parse_escape_sequence() -> Result<MenuKey> {
-    let Some(next) = poll_keypress_until(Duration::from_millis(20))? else {
+    let Some(next) = poll_keypress_until(Duration::from_millis(150))? else {
         return Ok(MenuKey::Escape);
     };
     if next != b'[' {
         return Ok(MenuKey::Escape);
     }
-    let Some(code) = poll_keypress_until(Duration::from_millis(20))? else {
+    let Some(code) = poll_keypress_until(Duration::from_millis(150))? else {
         return Ok(MenuKey::Escape);
     };
     match code {
@@ -3064,7 +2978,7 @@ mod tests {
     use super::{
         adjusted_block_size, block_size_floor, device_rank, format_bytes, format_grouped_u64,
         is_auxiliary_device, is_single_sector_target, normalize_block_size,
-        normalize_file_target_path, parse_selector_choice, parse_yes_no,
+        normalize_file_target_path, parse_yes_no,
     };
     use crate::profile::{AddressingMode, Profile, TargetMode};
     use crate::system::DeviceInfo;
@@ -3156,14 +3070,5 @@ mod tests {
         let normalized =
             normalize_file_target_path(&TargetMode::FileBased, dir.path().to_path_buf());
         assert_eq!(normalized, dir.path().join("emmc-lab.bin"));
-    }
-
-    #[test]
-    fn parses_selector_choices() {
-        assert_eq!(parse_selector_choice("3", 7).expect("valid"), 2);
-        assert!(parse_selector_choice("9", 7).is_err());
-        assert!(parse_selector_choice("0", 7).is_err());
-        assert!(parse_selector_choice("abc", 7).is_err());
-        assert!(parse_selector_choice("", 7).is_err());
     }
 }
