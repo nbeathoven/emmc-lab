@@ -1848,19 +1848,26 @@ fn prompt_string_default_help(
     default: Option<&str>,
     help: Option<&str>,
 ) -> Result<WizardInput<String>> {
+    prompt_string_default_help_seeded(label, default, None, help)
+}
+
+fn prompt_string_default_help_seeded(
+    label: &str,
+    default: Option<&str>,
+    initial: Option<&str>,
+    help: Option<&str>,
+) -> Result<WizardInput<String>> {
     loop {
         if let Some(help) = help {
             println!("Help: {}", help);
         }
-        match default {
-            Some(default) => print!("{} [{}]: ", label, default),
-            None => print!("{}: ", label),
-        }
-        io::stdout().flush()?;
-        let mut input = String::new();
-        if io::stdin().read_line(&mut input)? == 0 {
+        let prompt = match default {
+            Some(default) => format!("{} [{}]: ", label, default),
+            None => format!("{}: ", label),
+        };
+        let Some(input) = read_prompt_value(&prompt, initial)? else {
             return Ok(WizardInput::Cancel);
-        }
+        };
         let trimmed = input.trim();
         if trimmed.eq_ignore_ascii_case("back") {
             return Ok(WizardInput::Back);
@@ -1900,13 +1907,16 @@ fn prompt_menu_default_help(
     allowed: &[&str],
     help: Option<&str>,
 ) -> Result<WizardInput<String>> {
+    let mut retry_value = None::<String>;
     loop {
-        match prompt_string_default_help(label, Some(default), help)? {
+        match prompt_string_default_help_seeded(label, Some(default), retry_value.as_deref(), help)?
+        {
             WizardInput::Value(value) if allowed.contains(&value.as_str()) => {
                 println!("  Using: {}", value);
                 return Ok(WizardInput::Value(value));
             }
-            WizardInput::Value(_) => {
+            WizardInput::Value(value) => {
+                retry_value = Some(value);
                 println!("Invalid choice. Enter one of: {}", allowed.join(", "));
             }
             WizardInput::Back => return Ok(WizardInput::Back),
@@ -1923,16 +1933,28 @@ fn prompt_u64_in_range(
     help: Option<&str>,
 ) -> Result<WizardInput<u64>> {
     let default_text = default.to_string();
+    let mut retry_value = None::<String>;
     loop {
         let prompt_label = format!("{label} [{min}-{max}]");
-        match prompt_string_default_help(&prompt_label, Some(&default_text), help)? {
+        match prompt_string_default_help_seeded(
+            &prompt_label,
+            Some(&default_text),
+            retry_value.as_deref(),
+            help,
+        )? {
             WizardInput::Value(value) => match value.parse::<u64>() {
                 Ok(parsed) if parsed >= min && parsed <= max => {
                     println!("  Using: {}", parsed);
                     return Ok(WizardInput::Value(parsed));
                 }
-                Ok(_) => println!("Value must be between {min} and {max}"),
-                Err(err) => println!("Invalid value: {}", err),
+                Ok(_) => {
+                    retry_value = Some(value);
+                    println!("Value must be between {min} and {max}");
+                }
+                Err(err) => {
+                    retry_value = Some(value);
+                    println!("Invalid value: {}", err);
+                }
             },
             WizardInput::Back => return Ok(WizardInput::Back),
             WizardInput::Cancel => return Ok(WizardInput::Cancel),
@@ -1974,18 +1996,258 @@ fn prompt_bool_default(
     help: Option<&str>,
 ) -> Result<WizardInput<bool>> {
     let default_text = if default { "y" } else { "n" };
+    let mut retry_value = None::<String>;
     loop {
-        match prompt_string_default_help(&format!("{label} [y/n]"), Some(default_text), help)? {
+        match prompt_string_default_help_seeded(
+            &format!("{label} [y/n]"),
+            Some(default_text),
+            retry_value.as_deref(),
+            help,
+        )? {
             WizardInput::Value(value) => match parse_yes_no(&value) {
                 Ok(parsed) => {
                     println!("  Using: {}", if parsed { "y" } else { "n" });
                     return Ok(WizardInput::Value(parsed));
                 }
-                Err(_) => println!("Expected y or n"),
+                Err(_) => {
+                    retry_value = Some(value);
+                    println!("Expected y or n");
+                }
             },
             WizardInput::Back => return Ok(WizardInput::Back),
             WizardInput::Cancel => return Ok(WizardInput::Cancel),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptKey {
+    Char(char),
+    Enter,
+    Backspace,
+    Delete,
+    Left,
+    Right,
+    Home,
+    End,
+    Cancel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PromptBuffer {
+    text: String,
+    cursor: usize,
+}
+
+impl PromptBuffer {
+    fn from_seed(seed: Option<&str>) -> Self {
+        let text = seed.unwrap_or_default().to_string();
+        let cursor = text.chars().count();
+        Self { text, cursor }
+    }
+
+    fn insert(&mut self, ch: char) {
+        let byte = self.byte_index(self.cursor);
+        self.text.insert(byte, ch);
+        self.cursor += 1;
+    }
+
+    fn backspace(&mut self) {
+        if self.cursor == 0 {
+            return;
+        }
+        let end = self.byte_index(self.cursor);
+        let start = self.byte_index(self.cursor - 1);
+        self.text.replace_range(start..end, "");
+        self.cursor -= 1;
+    }
+
+    fn delete(&mut self) {
+        if self.cursor >= self.len() {
+            return;
+        }
+        let start = self.byte_index(self.cursor);
+        let end = self.byte_index(self.cursor + 1);
+        self.text.replace_range(start..end, "");
+    }
+
+    fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    fn move_right(&mut self) {
+        self.cursor = (self.cursor + 1).min(self.len());
+    }
+
+    fn move_home(&mut self) {
+        self.cursor = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.cursor = self.len();
+    }
+
+    fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    fn cursor_offset(&self, prompt_width: usize) -> usize {
+        prompt_width + self.cursor
+    }
+
+    fn byte_index(&self, char_index: usize) -> usize {
+        if char_index == self.len() {
+            return self.text.len();
+        }
+        self.text
+            .char_indices()
+            .nth(char_index)
+            .map(|(idx, _)| idx)
+            .unwrap_or(self.text.len())
+    }
+}
+
+struct PromptTerminalGuard {
+    original: libc::termios,
+    active: bool,
+}
+
+impl PromptTerminalGuard {
+    fn new() -> Result<Self> {
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1
+            || unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1
+        {
+            return Ok(Self {
+                original: unsafe { std::mem::zeroed() },
+                active: false,
+            });
+        }
+        let mut original = MaybeUninit::<libc::termios>::uninit();
+        if unsafe { libc::tcgetattr(libc::STDIN_FILENO, original.as_mut_ptr()) } != 0 {
+            bail!("failed to read terminal mode");
+        }
+        let original = unsafe { original.assume_init() };
+        let mut raw = original;
+        raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+        raw.c_cc[libc::VMIN] = 0;
+        raw.c_cc[libc::VTIME] = 0;
+        if unsafe { libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &raw) } != 0 {
+            bail!("failed to set prompt terminal mode");
+        }
+        Ok(Self {
+            original,
+            active: true,
+        })
+    }
+}
+
+impl Drop for PromptTerminalGuard {
+    fn drop(&mut self) {
+        if self.active {
+            unsafe {
+                libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &self.original);
+            }
+        }
+    }
+}
+
+fn read_prompt_value(prompt: &str, initial: Option<&str>) -> Result<Option<String>> {
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1
+        || unsafe { libc::isatty(libc::STDOUT_FILENO) } != 1
+    {
+        print!("{prompt}");
+        io::stdout().flush()?;
+        let mut input = String::new();
+        if io::stdin().read_line(&mut input)? == 0 {
+            return Ok(None);
+        }
+        return Ok(Some(input));
+    }
+
+    let _terminal = PromptTerminalGuard::new()?;
+    let mut buffer = PromptBuffer::from_seed(initial);
+    render_prompt_line(prompt, &buffer)?;
+    loop {
+        match read_prompt_key()? {
+            PromptKey::Char(ch) => buffer.insert(ch),
+            PromptKey::Backspace => buffer.backspace(),
+            PromptKey::Delete => buffer.delete(),
+            PromptKey::Left => buffer.move_left(),
+            PromptKey::Right => buffer.move_right(),
+            PromptKey::Home => buffer.move_home(),
+            PromptKey::End => buffer.move_end(),
+            PromptKey::Enter => {
+                println!();
+                io::stdout().flush()?;
+                return Ok(Some(buffer.text));
+            }
+            PromptKey::Cancel => {
+                println!();
+                io::stdout().flush()?;
+                return Ok(None);
+            }
+        }
+        render_prompt_line(prompt, &buffer)?;
+    }
+}
+
+fn render_prompt_line(prompt: &str, buffer: &PromptBuffer) -> Result<()> {
+    write!(io::stdout(), "\r\u{1b}[K{}{}", prompt, buffer.text)?;
+    let cursor = buffer.cursor_offset(prompt.chars().count());
+    if cursor > 0 {
+        write!(io::stdout(), "\r\u{1b}[{}C", cursor)?;
+    } else {
+        write!(io::stdout(), "\r")?;
+    }
+    io::stdout().flush()?;
+    Ok(())
+}
+
+fn read_prompt_key() -> Result<PromptKey> {
+    loop {
+        let Some(byte) = poll_keypress_until(Duration::from_secs(60))? else {
+            continue;
+        };
+        return match byte {
+            b'\r' | b'\n' => Ok(PromptKey::Enter),
+            3 | 4 => Ok(PromptKey::Cancel),
+            8 | 127 => Ok(PromptKey::Backspace),
+            1 => Ok(PromptKey::Home),
+            5 => Ok(PromptKey::End),
+            27 => parse_prompt_escape_sequence(),
+            b' '..=b'~' => Ok(PromptKey::Char(byte as char)),
+            _ => continue,
+        };
+    }
+}
+
+fn parse_prompt_escape_sequence() -> Result<PromptKey> {
+    let Some(next) = poll_keypress_until(Duration::from_millis(150))? else {
+        return Ok(PromptKey::Cancel);
+    };
+    if next != b'[' {
+        return Ok(PromptKey::Cancel);
+    }
+    let Some(code) = poll_keypress_until(Duration::from_millis(150))? else {
+        return Ok(PromptKey::Cancel);
+    };
+    match code {
+        b'C' => Ok(PromptKey::Right),
+        b'D' => Ok(PromptKey::Left),
+        b'H' => Ok(PromptKey::Home),
+        b'F' => Ok(PromptKey::End),
+        b'1' | b'3' | b'4' | b'7' | b'8' => {
+            let Some(suffix) = poll_keypress_until(Duration::from_millis(150))? else {
+                return Ok(PromptKey::Cancel);
+            };
+            match (code, suffix) {
+                (b'1', b'~') | (b'7', b'~') => Ok(PromptKey::Home),
+                (b'3', b'~') => Ok(PromptKey::Delete),
+                (b'4', b'~') | (b'8', b'~') => Ok(PromptKey::End),
+                _ => Ok(PromptKey::Cancel),
+            }
+        }
+        _ => Ok(PromptKey::Cancel),
     }
 }
 
@@ -2979,6 +3241,7 @@ mod tests {
         adjusted_block_size, block_size_floor, device_rank, format_bytes, format_grouped_u64,
         is_auxiliary_device, is_single_sector_target, normalize_block_size,
         normalize_file_target_path, parse_yes_no,
+        PromptBuffer,
     };
     use crate::profile::{AddressingMode, Profile, TargetMode};
     use crate::system::DeviceInfo;
@@ -3070,5 +3333,49 @@ mod tests {
         let normalized =
             normalize_file_target_path(&TargetMode::FileBased, dir.path().to_path_buf());
         assert_eq!(normalized, dir.path().join("emmc-lab.bin"));
+    }
+
+    #[test]
+    fn prompt_buffer_edits_seeded_invalid_value() {
+        let mut buffer = PromptBuffer::from_seed(Some("12x4"));
+        buffer.move_left();
+        buffer.move_left();
+        buffer.backspace();
+        buffer.insert('3');
+        assert_eq!(buffer.text, "13x4");
+        assert_eq!(buffer.cursor, 2);
+    }
+
+    #[test]
+    fn prompt_buffer_delete_removes_character_under_cursor() {
+        let mut buffer = PromptBuffer::from_seed(Some("1a24"));
+        buffer.move_home();
+        buffer.move_right();
+        buffer.delete();
+        assert_eq!(buffer.text, "124");
+        assert_eq!(buffer.cursor, 1);
+    }
+
+    #[test]
+    fn prompt_buffer_home_end_and_bounds_are_stable() {
+        let mut buffer = PromptBuffer::from_seed(Some("512"));
+        buffer.move_home();
+        buffer.backspace();
+        assert_eq!(buffer.text, "512");
+        assert_eq!(buffer.cursor, 0);
+        buffer.move_end();
+        buffer.move_right();
+        assert_eq!(buffer.cursor, 3);
+        buffer.delete();
+        assert_eq!(buffer.text, "512");
+    }
+
+    #[test]
+    fn prompt_buffer_inserts_in_middle_after_arrow_navigation() {
+        let mut buffer = PromptBuffer::from_seed(Some("104"));
+        buffer.move_left();
+        buffer.insert('2');
+        assert_eq!(buffer.text, "1024");
+        assert_eq!(buffer.cursor, 3);
     }
 }
