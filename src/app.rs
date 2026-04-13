@@ -1009,7 +1009,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         println!("3. Save and run now");
         println!("4. Back");
         println!("5. Cancel");
-        match prompt_menu_default("Action [1-5]", "4", &["1", "2", "3", "4", "5"])? {
+        match prompt_menu_default_help("Action [1-5]", "4", &["1", "2", "3", "4", "5"], None)? {
             WizardInput::Value(value) if value == "1" => {
                 profile.save(&profile_path)?;
                 println!("Saved profile: {}", profile_path.display());
@@ -1738,7 +1738,7 @@ fn run_profile_session_interactive(paths: &AppPaths, profile: Profile) -> Result
         println!("1. Repeat same test");
         println!("2. View this report");
         println!("3. Back");
-        match prompt_menu_default("Action [1-3]", "3", &["1", "2", "3"])? {
+        match prompt_menu_default_help("Action [1-3]", "3", &["1", "2", "3"], None)? {
             WizardInput::Value(value) if value == "1" => continue,
             WizardInput::Value(value) if value == "2" => {
                 run_report(paths, &session_id)?;
@@ -1893,14 +1893,6 @@ fn prompt_string_default_help_seeded(
     }
 }
 
-fn prompt_menu_default(
-    label: &str,
-    default: &str,
-    allowed: &[&str],
-) -> Result<WizardInput<String>> {
-    prompt_menu_default_help(label, default, allowed, None)
-}
-
 fn prompt_menu_default_help(
     label: &str,
     default: &str,
@@ -2026,6 +2018,7 @@ enum PromptKey {
     Enter,
     Backspace,
     Delete,
+    Escape,
     Left,
     Right,
     Home,
@@ -2172,6 +2165,7 @@ fn read_prompt_value(prompt: &str, initial: Option<&str>) -> Result<Option<Strin
             PromptKey::Char(ch) => buffer.insert(ch),
             PromptKey::Backspace => buffer.backspace(),
             PromptKey::Delete => buffer.delete(),
+            PromptKey::Escape => {}
             PromptKey::Left => buffer.move_left(),
             PromptKey::Right => buffer.move_right(),
             PromptKey::Home => buffer.move_home(),
@@ -2223,13 +2217,13 @@ fn read_prompt_key() -> Result<PromptKey> {
 
 fn parse_prompt_escape_sequence() -> Result<PromptKey> {
     let Some(next) = poll_keypress_until(Duration::from_millis(150))? else {
-        return Ok(PromptKey::Cancel);
+        return Ok(PromptKey::Escape);
     };
     if next != b'[' {
-        return Ok(PromptKey::Cancel);
+        return Ok(PromptKey::Escape);
     }
     let Some(code) = poll_keypress_until(Duration::from_millis(150))? else {
-        return Ok(PromptKey::Cancel);
+        return Ok(PromptKey::Escape);
     };
     match code {
         b'C' => Ok(PromptKey::Right),
@@ -2238,16 +2232,16 @@ fn parse_prompt_escape_sequence() -> Result<PromptKey> {
         b'F' => Ok(PromptKey::End),
         b'1' | b'3' | b'4' | b'7' | b'8' => {
             let Some(suffix) = poll_keypress_until(Duration::from_millis(150))? else {
-                return Ok(PromptKey::Cancel);
+                return Ok(PromptKey::Escape);
             };
             match (code, suffix) {
                 (b'1', b'~') | (b'7', b'~') => Ok(PromptKey::Home),
                 (b'3', b'~') => Ok(PromptKey::Delete),
                 (b'4', b'~') | (b'8', b'~') => Ok(PromptKey::End),
-                _ => Ok(PromptKey::Cancel),
+                _ => Ok(PromptKey::Escape),
             }
         }
-        _ => Ok(PromptKey::Cancel),
+        _ => Ok(PromptKey::Escape),
     }
 }
 

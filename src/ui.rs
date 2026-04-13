@@ -1,3 +1,4 @@
+use crate::diagnostics::DiagnosticReport;
 use crate::health::HealthReport;
 use crate::storage::SessionRecord;
 use crate::system::{AppPaths, CapabilityReport, DeviceInfo, DoctorReport, SystemSnapshot};
@@ -534,60 +535,7 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
             ));
         }
     } else if let Some(diag) = &record.diagnostics {
-        let diag_rows = vec![
-            (
-                "Mode".to_string(),
-                format!("{:?}", diag.mode).to_lowercase(),
-            ),
-            ("Started".to_string(), diag.started_at.to_rfc3339()),
-            ("Ended".to_string(), diag.ended_at.to_rfc3339()),
-            (
-                "Duration".to_string(),
-                format!("{} s", diag.duration_seconds),
-            ),
-            (
-                "Observed".to_string(),
-                format!(
-                    "{} processes, {} files, {} directories, {} devices",
-                    diag.top_processes.len(),
-                    diag.top_files.len(),
-                    diag.top_directories.len(),
-                    diag.device_totals.len()
-                ),
-            ),
-            (
-                "Unresolved Paths".to_string(),
-                diag.unresolved_path_count.to_string(),
-            ),
-            (
-                "Dropped Events".to_string(),
-                diag.dropped_event_count.to_string(),
-            ),
-            (
-                "Restricted".to_string(),
-                diag.restricted_process_count.to_string(),
-            ),
-            (
-                "Kernel-like".to_string(),
-                diag.kernel_process_count.to_string(),
-            ),
-            (
-                "Unattrib Read".to_string(),
-                fmt_bytes(diag.unattributed_storage_read_bytes),
-            ),
-            (
-                "Unattrib Write".to_string(),
-                fmt_bytes(diag.unattributed_storage_write_bytes),
-            ),
-            (
-                "Proc>Dev Read".to_string(),
-                fmt_bytes(diag.process_excess_storage_read_bytes),
-            ),
-            (
-                "Proc>Dev Write".to_string(),
-                fmt_bytes(diag.process_excess_storage_write_bytes),
-            ),
-        ];
+        let diag_rows = build_diag_rows(diag);
         out.push_str(&ui.pair(
             |ui| ui.kv_table("Session", &session_rows, Some(ui.width)),
             |ui| ui.kv_table("Diagnostics", &diag_rows, Some(ui.width)),
@@ -598,60 +546,7 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
 
     if let Some(diag) = &record.diagnostics {
         if record.run_summary.is_some() {
-            let diag_rows = vec![
-                (
-                    "Mode".to_string(),
-                    format!("{:?}", diag.mode).to_lowercase(),
-                ),
-                ("Started".to_string(), diag.started_at.to_rfc3339()),
-                ("Ended".to_string(), diag.ended_at.to_rfc3339()),
-                (
-                    "Duration".to_string(),
-                    format!("{} s", diag.duration_seconds),
-                ),
-                (
-                    "Observed".to_string(),
-                    format!(
-                        "{} processes, {} files, {} directories, {} devices",
-                        diag.top_processes.len(),
-                        diag.top_files.len(),
-                        diag.top_directories.len(),
-                        diag.device_totals.len()
-                    ),
-                ),
-                (
-                    "Unresolved Paths".to_string(),
-                    diag.unresolved_path_count.to_string(),
-                ),
-                (
-                    "Dropped Events".to_string(),
-                    diag.dropped_event_count.to_string(),
-                ),
-                (
-                    "Restricted".to_string(),
-                    diag.restricted_process_count.to_string(),
-                ),
-                (
-                    "Kernel-like".to_string(),
-                    diag.kernel_process_count.to_string(),
-                ),
-                (
-                    "Unattrib Read".to_string(),
-                    fmt_bytes(diag.unattributed_storage_read_bytes),
-                ),
-                (
-                    "Unattrib Write".to_string(),
-                    fmt_bytes(diag.unattributed_storage_write_bytes),
-                ),
-                (
-                    "Proc>Dev Read".to_string(),
-                    fmt_bytes(diag.process_excess_storage_read_bytes),
-                ),
-                (
-                    "Proc>Dev Write".to_string(),
-                    fmt_bytes(diag.process_excess_storage_write_bytes),
-                ),
-            ];
+            let diag_rows = build_diag_rows(diag);
             out.push_str(&ui.kv_table("Diagnostics", &diag_rows, None));
         }
         out.push_str(&ui.note(
@@ -682,62 +577,6 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
             })
             .collect::<Vec<_>>();
         if !process_rows.is_empty() {
-            let _processes_panel = ui.table(
-                "Top Processes",
-                &[
-                    Column {
-                        header: "PID",
-                        min: 5,
-                        max: 7,
-                        align: Align::Right,
-                    },
-                    Column {
-                        header: "User",
-                        min: 6,
-                        max: 12,
-                        align: Align::Left,
-                    },
-                    Column {
-                        header: "Command",
-                        min: 10,
-                        max: 18,
-                        align: Align::Left,
-                    },
-                    Column {
-                        header: "Log R/s",
-                        min: 10,
-                        max: 12,
-                        align: Align::Right,
-                    },
-                    Column {
-                        header: "Log W/s",
-                        min: 10,
-                        max: 12,
-                        align: Align::Right,
-                    },
-                    Column {
-                        header: "Store R/s",
-                        min: 10,
-                        max: 12,
-                        align: Align::Right,
-                    },
-                    Column {
-                        header: "Store W/s",
-                        min: 10,
-                        max: 12,
-                        align: Align::Right,
-                    },
-                    Column {
-                        header: "Share",
-                        min: 7,
-                        max: 8,
-                        align: Align::Right,
-                    },
-                ],
-                &process_rows,
-                None,
-            );
-
             let path_rows = diag
                 .top_processes
                 .iter()
@@ -752,43 +591,6 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
                     ]
                 })
                 .collect::<Vec<_>>();
-            let _path_panel = ui.table(
-                "Process Paths",
-                &[
-                    Column {
-                        header: "PID",
-                        min: 5,
-                        max: 7,
-                        align: Align::Right,
-                    },
-                    Column {
-                        header: "Executable",
-                        min: 14,
-                        max: 28,
-                        align: Align::Left,
-                    },
-                    Column {
-                        header: "CWD",
-                        min: 14,
-                        max: 24,
-                        align: Align::Left,
-                    },
-                    Column {
-                        header: "Hottest File",
-                        min: 14,
-                        max: 28,
-                        align: Align::Left,
-                    },
-                    Column {
-                        header: "Hottest Dir",
-                        min: 14,
-                        max: 24,
-                        align: Align::Left,
-                    },
-                ],
-                &path_rows,
-                None,
-            );
             out.push_str(&ui.pair(
                 |ui| {
                     ui.table(
@@ -2410,6 +2212,63 @@ fn fmt_percent(value: f64) -> String {
 
 fn fmt_us(value: u64) -> String {
     format!("{value} us")
+}
+
+fn build_diag_rows(diag: &DiagnosticReport) -> Vec<(String, String)> {
+    vec![
+        (
+            "Mode".to_string(),
+            format!("{:?}", diag.mode).to_lowercase(),
+        ),
+        ("Started".to_string(), diag.started_at.to_rfc3339()),
+        ("Ended".to_string(), diag.ended_at.to_rfc3339()),
+        (
+            "Duration".to_string(),
+            format!("{} s", diag.duration_seconds),
+        ),
+        (
+            "Observed".to_string(),
+            format!(
+                "{} processes, {} files, {} directories, {} devices",
+                diag.top_processes.len(),
+                diag.top_files.len(),
+                diag.top_directories.len(),
+                diag.device_totals.len()
+            ),
+        ),
+        (
+            "Unresolved Paths".to_string(),
+            diag.unresolved_path_count.to_string(),
+        ),
+        (
+            "Dropped Events".to_string(),
+            diag.dropped_event_count.to_string(),
+        ),
+        (
+            "Restricted".to_string(),
+            diag.restricted_process_count.to_string(),
+        ),
+        (
+            "Kernel-like".to_string(),
+            diag.kernel_process_count.to_string(),
+        ),
+        (
+            "Unattrib Read".to_string(),
+            fmt_bytes(diag.unattributed_storage_read_bytes),
+        ),
+        (
+            "Unattrib Write".to_string(),
+            fmt_bytes(diag.unattributed_storage_write_bytes),
+        ),
+        (
+            "Proc>Dev Read".to_string(),
+            fmt_bytes(diag.process_excess_storage_read_bytes),
+        ),
+        (
+            "Proc>Dev Write".to_string(),
+            fmt_bytes(diag.process_excess_storage_write_bytes),
+        ),
+    ]
 }
 
 fn detect_hostname() -> String {
