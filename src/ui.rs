@@ -1150,7 +1150,7 @@ pub(crate) fn render_selector_screen(
         .enumerate()
         .map(|(index, row)| {
             let marker = if index == selected { ">" } else { " " };
-            let mut cells = vec![marker.to_string(), (index + 1).to_string()];
+            let mut cells = vec![marker.to_string()];
             cells.extend(row.cells.clone());
             cells
         })
@@ -1161,12 +1161,6 @@ pub(crate) fn render_selector_screen(
         max: 1,
         align: Align::Left,
     }];
-    selector_columns.push(Column {
-        header: "#",
-        min: 1,
-        max: 3,
-        align: Align::Right,
-    });
     selector_columns.extend(columns.iter().map(|column| Column {
         header: column.header,
         min: column.min,
