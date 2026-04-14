@@ -12,6 +12,11 @@ use emmc_lab::system::{assess_raw_target_safety, list_devices, AppPaths};
 use std::fs;
 use tempfile::TempDir;
 
+#[cfg(target_os = "linux")]
+use emmc_lab::filemap::{collect_file_map, filemap_report_to_csv};
+#[cfg(target_os = "linux")]
+use emmc_lab::lba_trace::blktrace_debugfs_available;
+
 fn temp_paths() -> Result<(TempDir, AppPaths)> {
     let dir = tempfile::tempdir()?;
     let base = dir.path().join("data");
@@ -124,7 +129,7 @@ fn session_json_is_summary_only_but_intervals_can_be_loaded() -> Result<()> {
 
 #[test]
 fn health_unavailable_fallback_is_nonfatal() -> Result<()> {
-    let snapshot = read_emmc_health(std::path::Path::new("/dev/mmcblk0"))?;
+    let snapshot = read_emmc_health(std::path::Path::new("/dev/mmcblk0"), None, None)?;
     if !snapshot.available {
         assert!(snapshot.note.contains("unavailable"));
     }
@@ -177,5 +182,49 @@ fn raw_mode_safety_refuses_mounted_or_nonblock_targets() -> Result<()> {
     }
     let assessment = assess_raw_target_safety(std::path::Path::new("/dev/null"), true, false)?;
     assert!(!assessment.allowed);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_map_collects_extents_for_regular_file() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let target = tmp.path().join("mapped.bin");
+    fs::write(&target, vec![0x5a; 64 * 1024])?;
+    let report = collect_file_map(&target, None)?;
+    assert!(!report.extents.is_empty());
+    assert!(report.extent_count >= 1);
+    assert_eq!(
+        report.total_extent_bytes,
+        report.extents.iter().map(|e| e.length).sum::<u64>()
+    );
+    assert!(matches!(report.method.as_str(), "fiemap" | "fibmap"));
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn file_map_csv_contains_expected_columns() -> Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let target = tmp.path().join("mapped.csv.bin");
+    fs::write(&target, vec![0x33; 16 * 1024])?;
+    let report = collect_file_map(&target, None)?;
+    let csv = filemap_report_to_csv(&report);
+    assert!(csv.starts_with("logical_offset,physical_lba,length,flags,flag_names,erase_aligned"));
+    assert!(csv.lines().count() >= 2);
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn blktrace_probe_returns_structured_result() -> Result<()> {
+    let device = list_devices()?
+        .into_iter()
+        .find(|dev| dev.name.starts_with("mmcblk"))
+        .map(|dev| dev.path)
+        .unwrap_or_else(|| std::path::PathBuf::from("/dev/mmcblk0"));
+    let check = blktrace_debugfs_available(&device.display().to_string())?;
+    assert_eq!(check.name, "blktrace_debugfs");
+    assert!(!check.detail.trim().is_empty());
     Ok(())
 }

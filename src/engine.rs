@@ -150,7 +150,7 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
     let stop_flag = Arc::new(AtomicBool::new(false));
     let next_op = Arc::new(AtomicU64::new(0));
     let (interval_tx, interval_rx) = mpsc::channel::<IntervalStats>();
-    let (worker_tx, worker_rx) = mpsc::channel::<LocalStats>();
+    let (worker_tx, worker_rx) = mpsc::channel::<Result<LocalStats, String>>();
     let report_interval = Duration::from_millis(profile.workload.report_interval_ms.max(100));
     let interval_counters = Arc::clone(&counters);
     let interval_stop = Arc::clone(&stop_flag);
@@ -194,28 +194,48 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
         let profile = profile.clone();
         let counters = Arc::clone(&counters);
         let stop = Arc::clone(&stop_flag);
+        let failure_stop = Arc::clone(&stop_flag);
         let next_op = Arc::clone(&next_op);
         let worker_tx = worker_tx.clone();
         let range = resolved_range.clone();
         joins.push(thread::spawn(move || {
             let stats = worker_loop(worker_id, &profile, range, counters, stop, next_op, started);
-            let _ = worker_tx.send(stats.unwrap_or_default());
+            if stats.is_err() {
+                failure_stop.store(true, Ordering::Relaxed);
+            }
+            let _ = worker_tx.send(stats.map_err(|err| format!("{err:#}")));
         }));
     }
     drop(worker_tx);
 
+    let mut join_error = None::<String>;
     for join in joins {
-        let _ = join.join();
+        if join.join().is_err() && join_error.is_none() {
+            join_error = Some("worker thread panicked".to_string());
+        }
     }
     stop_flag.store(true, Ordering::Relaxed);
     let _ = sampler.join();
 
     let intervals = interval_rx.into_iter().collect::<Vec<_>>();
     let mut merged = LocalStats::default();
+    let mut worker_error = None::<String>;
     for local in worker_rx.into_iter() {
-        merged.read_hist.merge(&local.read_hist);
-        merged.write_hist.merge(&local.write_hist);
-        merge_verify(&mut merged.verify, &local.verify);
+        match local {
+            Ok(local) => {
+                merged.read_hist.merge(&local.read_hist);
+                merged.write_hist.merge(&local.write_hist);
+                merge_verify(&mut merged.verify, &local.verify);
+            }
+            Err(err) if worker_error.is_none() => worker_error = Some(err),
+            Err(_) => {}
+        }
+    }
+    if let Some(err) = join_error {
+        bail!("workload worker failed: {err}");
+    }
+    if let Some(err) = worker_error {
+        bail!("workload worker failed: {err}");
     }
     let ended_at = Utc::now();
     let current = snapshot_counters(&counters);
@@ -813,8 +833,11 @@ fn o_direct_flag() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_op_kind, splitmix64};
-    use crate::profile::{Profile, WorkloadType};
+    use super::{compute_op_kind, execute_profile, splitmix64};
+    use crate::profile::{Profile, TargetMode, WorkloadType};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::tempdir;
 
     #[test]
     fn random_seed_is_reproducible() {
@@ -827,5 +850,40 @@ mod tests {
         profile.workload.test_type = WorkloadType::RandRw;
         profile.workload.read_percentage = 50;
         assert!(matches!(compute_op_kind(&profile, 3), _));
+    }
+
+    #[test]
+    fn execute_profile_surfaces_worker_open_errors() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("denied.bin");
+        fs::write(&path, vec![0_u8; 4096]).expect("seed file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0)).expect("chmod 000");
+
+        let mut profile = Profile::default_named("denied");
+        profile.target.mode = TargetMode::FileBased;
+        profile.target.path = path.clone();
+        profile.workload.test_type = WorkloadType::RandRead;
+        profile.workload.block_size_bytes = 4096;
+        profile.workload.runtime_seconds = None;
+        profile.workload.exact_op_count = Some(1);
+        profile.addressing.mode = crate::profile::AddressingMode::WholeSelectedRange;
+        profile.workload.direct_io = false;
+        profile.telemetry.health_telemetry = false;
+        profile.reporting.export_json = false;
+        profile.reporting.export_csv = false;
+        profile.reporting.export_html = false;
+
+        let err = execute_profile(&profile).expect_err("range should be rejected");
+        let text = format!("{err:#}");
+        assert!(
+            text.contains("workload worker failed"),
+            "unexpected error text: {text}"
+        );
+        assert!(
+            text.contains("failed to open") || text.contains("Permission denied"),
+            "unexpected error text: {text}"
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("restore perms");
     }
 }

@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 const DEFAULT_TERMINAL_WIDTH: usize = 80;
 const DEFAULT_TERMINAL_HEIGHT: usize = 40;
 const ELLIPSIS: char = '…';
+const ABBREVIATED_INLINE_LIMIT: usize = 25;
 
 static COLOR_POLICY: AtomicU8 = AtomicU8::new(ColorPolicy::Auto as u8);
 
@@ -308,7 +309,7 @@ impl Ui {
     }
 
     fn cell(&self, value: &str, width: usize, align: Align) -> String {
-        let sanitized = sanitize_inline(value);
+        let sanitized = prepare_inline_display(value);
         let display = if sanitized.is_empty() {
             "-"
         } else {
@@ -1042,6 +1043,18 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
             },
         ),
         (
+            "Source".to_string(),
+            opt_text(report.emmc.ext_csd_source.as_deref()),
+        ),
+        (
+            "EXT_CSD_REV".to_string(),
+            report
+                .emmc
+                .ext_csd_rev
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
             "DEVICE_LIFE_TIME_EST_TYP_A".to_string(),
             opt_text(report.emmc.device_life_time_est_typ_a.as_deref()),
         ),
@@ -1053,15 +1066,81 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
             "PRE_EOL_INFO".to_string(),
             opt_text(report.emmc.pre_eol_info.as_deref()),
         ),
+        (
+            "SEC_COUNT".to_string(),
+            report
+                .emmc
+                .sec_count
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
+            "BKOPS".to_string(),
+            report
+                .emmc
+                .bkops_status
+                .map(|value| {
+                    format!(
+                        "0x{value:02x} ({})",
+                        opt_text(report.emmc.bkops_urgency.as_deref())
+                    )
+                })
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
+            "Cache".to_string(),
+            match (report.emmc.cache_size_kb, report.emmc.cache_ctrl) {
+                (Some(size_kb), Some(ctrl)) => format!("{size_kb} KiB / ctrl {ctrl}"),
+                _ => "-".to_string(),
+            },
+        ),
+        (
+            "Erase Block".to_string(),
+            report
+                .emmc
+                .erase_group_size_bytes
+                .map(fmt_bytes)
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
+            "FW".to_string(),
+            opt_text(report.emmc.firmware_version.as_deref()),
+        ),
     ];
     out.push_str(&ui.pair(
         |ui| ui.kv_table("System", &system_rows, Some(ui.width)),
         |ui| ui.kv_table("eMMC Health", &emmc_rows, Some(ui.width)),
     ));
     out.push_str(&ui.note("Note:", &report.emmc.note));
+    if let Some(cid) = &report.emmc.cid {
+        out.push_str(&ui.note(
+            "CID:",
+            &format!(
+                "MID=0x{:02x} OID={} PNM={} PRV={} PSN={} MDT={}",
+                cid.mid, cid.oid, cid.pnm, cid.prv, cid.psn, cid.mdt
+            ),
+        ));
+    }
+    if let Some(vendor) = &report.emmc.vendor_info {
+        let detail = match vendor {
+            crate::health::VendorSpecificInfo::Samsung { health_data }
+            | crate::health::VendorSpecificInfo::SanDisk { health_data }
+            | crate::health::VendorSpecificInfo::Micron { health_data }
+            | crate::health::VendorSpecificInfo::Hynix { health_data } => health_data
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            crate::health::VendorSpecificInfo::Unknown { raw_bytes } => format!(
+                "{} raw vendor bytes",
+                raw_bytes.len()
+            ),
+        };
+        out.push_str(&ui.note("Vendor:", &detail));
+    }
     if let Some(raw) = &report.emmc.raw_text {
         out.push_str(&ui.note(
-            "Raw mmc-utils:",
+            "Raw EXT_CSD:",
             &truncate_text(raw, ui.width.saturating_sub(20)),
         ));
     }
@@ -2076,9 +2155,83 @@ fn truncate_text(value: &str, width: usize) -> String {
     if width == 1 {
         return ELLIPSIS.to_string();
     }
+    if should_preserve_tail(value) {
+        return abbreviate_middle(value, width);
+    }
     let mut out = value.chars().take(width - 1).collect::<String>();
     out.push(ELLIPSIS);
     out
+}
+
+fn prepare_inline_display(value: &str) -> String {
+    let sanitized = sanitize_inline(value);
+    abbreviate_for_display(&sanitized, ABBREVIATED_INLINE_LIMIT)
+}
+
+fn abbreviate_for_display(value: &str, max_width: usize) -> String {
+    let len = value.chars().count();
+    if len <= max_width || max_width == 0 {
+        return value.to_string();
+    }
+    if is_path_like(value) {
+        return abbreviate_path_like(value, max_width);
+    }
+    if should_preserve_tail(value) {
+        return abbreviate_middle(value, max_width);
+    }
+    value.to_string()
+}
+
+fn abbreviate_path_like(value: &str, max_width: usize) -> String {
+    if max_width <= 1 {
+        return ELLIPSIS.to_string();
+    }
+
+    let separator = if value.contains('/') { '/' } else { '\\' };
+    let Some((prefix, suffix)) = value.rsplit_once(separator) else {
+        return abbreviate_middle(value, max_width);
+    };
+    let suffix_len = suffix.chars().count();
+    if suffix_len + 2 >= max_width {
+        return abbreviate_middle(suffix, max_width);
+    }
+
+    let prefix_budget = max_width.saturating_sub(suffix_len + 2);
+    let prefix_head = prefix.chars().take(prefix_budget).collect::<String>();
+    format!("{prefix_head}{ELLIPSIS}{separator}{suffix}")
+}
+
+fn abbreviate_middle(value: &str, width: usize) -> String {
+    let len = value.chars().count();
+    if len <= width {
+        return value.to_string();
+    }
+    if width == 0 {
+        return String::new();
+    }
+    if width == 1 {
+        return ELLIPSIS.to_string();
+    }
+    let left = (width - 1) / 2;
+    let right = width - 1 - left;
+    let head = value.chars().take(left).collect::<String>();
+    let tail = value
+        .chars()
+        .skip(len.saturating_sub(right))
+        .collect::<String>();
+    format!("{head}{ELLIPSIS}{tail}")
+}
+
+fn should_preserve_tail(value: &str) -> bool {
+    is_path_like(value) || is_filename_like(value)
+}
+
+fn is_path_like(value: &str) -> bool {
+    value.contains('/') || value.contains('\\')
+}
+
+fn is_filename_like(value: &str) -> bool {
+    !value.chars().any(char::is_whitespace) && value.contains('.')
 }
 
 fn shrink_widths_to_budget(
@@ -2295,13 +2448,29 @@ fn detect_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        resolve_color_enabled, set_color_policy, shrink_widths_to_budget, truncate_text,
-        visible_width, Align, ColorPolicy, Column, Ui,
+        abbreviate_for_display, resolve_color_enabled, set_color_policy,
+        shrink_widths_to_budget, truncate_text, visible_width, Align, ColorPolicy, Column, Ui,
     };
 
     #[test]
     fn truncates_with_unicode_ellipsis() {
         assert_eq!(truncate_text("abcdefgh", 6), "abcde…");
+    }
+
+    #[test]
+    fn abbreviates_long_paths_to_preserve_filename() {
+        assert_eq!(
+            abbreviate_for_display("/home/nima/.local/share/emmc-lab/session.json", 25),
+            "/home/nima/…/session.json"
+        );
+    }
+
+    #[test]
+    fn truncates_path_in_middle_when_column_is_narrow() {
+        assert_eq!(
+            truncate_text("/home/nima/.local/share/session.json", 14),
+            "/home/…on.json"
+        );
     }
 
     #[test]

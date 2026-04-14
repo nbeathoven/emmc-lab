@@ -2,6 +2,16 @@
 
 All notable changes to `emmc-lab` are documented in this file.
 
+## v0.2.5 - 2026-04-14
+
+- added direct EXT_CSD parsing with Linux-gated raw access, richer health fields, vendor decode, raw dumps, and expanded doctor checks
+- added `file-map`, `lba-trace`, and `health-compare` commands for host-visible sector mapping, trace capture, and FA report comparison
+- added host-side read-disturb estimation when page geometry is supplied on the health command
+- fixed FIEMAP and sector-size lookup on Raspberry Pi/Linux so file mapping works without raw-device read permission on partition nodes
+- propagated worker-thread failures back to the run result so impossible or blocked workloads fail loudly instead of producing misleading zero-I/O summaries
+- abbreviated long path-like values consistently in the SSH/TUI renderer so filenames and path tails remain visible
+- expanded integration coverage and validated the tested state on `safasnooper`
+
 ## v0.2.4 - 2026-04-12
 
 - made shared tables and the live monitor respect the active terminal width with an 80-column fallback when dimensions cannot be queried

@@ -2,7 +2,13 @@ use crate::diagnostics::{
     run_deep_trace, run_live_sampler, run_live_sampler_until, DiagnosticReport, LiveSamplerState,
 };
 use crate::engine::execute_profile;
-use crate::health::{collect_health, read_emmc_health};
+use crate::filemap;
+use crate::health::{
+    build_read_disturb_model, collect_health, format_raw_extcsd_dump, read_emmc_health,
+    ReadDisturbInput,
+};
+use crate::health_compare::{self, render_health_compare_html};
+use crate::lba_trace::{self, LbaTraceOptions};
 use crate::presets::{
     category_label, preset_categories, presets_in_category, resolve_preset, PresetId,
     PresetTargetScope,
@@ -15,7 +21,7 @@ use crate::storage::{
 };
 use crate::system::{
     assess_raw_target_safety, block_device_size, collect_capabilities, collect_system_snapshot,
-    doctor, list_devices, logical_block_size, AppPaths, DeviceInfo,
+    diskstats_map, doctor, list_devices, logical_block_size, AppPaths, DeviceInfo,
 };
 use crate::ui::{
     render_device_list, render_doctor_report, render_health_report, render_live_monitor,
@@ -287,7 +293,7 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
 
     if profile.telemetry.health_telemetry {
         record.health_before = Some(with_spinner("Collecting pre-run health", || {
-            read_emmc_health(&profile.target.path)
+            read_emmc_health(&profile.target.path, None, None)
         })?);
     }
 
@@ -309,7 +315,7 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
 
     if profile.telemetry.health_telemetry {
         record.health_after = Some(with_spinner("Collecting post-run health", || {
-            read_emmc_health(&profile.target.path)
+            read_emmc_health(&profile.target.path, None, None)
         })?);
     }
 
@@ -354,9 +360,56 @@ pub fn run_profile_path(
     run_profile_session(paths, profile)
 }
 
-pub fn run_health(paths: &AppPaths, device: &Path) -> Result<()> {
-    let report = with_spinner("Collecting health", || collect_health(paths, device))?;
+pub fn run_health(
+    paths: &AppPaths,
+    device: &Path,
+    raw_extcsd: bool,
+    page_size_kb: Option<u64>,
+    pages_per_block: Option<u64>,
+    read_disturb_threshold: u64,
+) -> Result<()> {
+    let report = with_spinner("Collecting health", || {
+        collect_health(paths, device, page_size_kb, pages_per_block)
+    })?;
     println!("{}", render_health_report(&report));
+    if let (Some(page_size_kb), Some(pages_per_block), Some(sec_count), Some(total_bytes_read)) = (
+        page_size_kb,
+        pages_per_block,
+        report.emmc.sec_count,
+        host_total_bytes_read(device),
+    ) {
+        let model = build_read_disturb_model(ReadDisturbInput {
+            total_bytes_read,
+            page_size_kb,
+            pages_per_block,
+            read_disturb_threshold,
+            device_capacity_bytes: sec_count.saturating_mul(512),
+        });
+        println!("Read Disturb Estimate:");
+        println!(
+            "  estimated_reads_per_block={:.4}",
+            model.estimated_reads_per_block
+        );
+        println!("  threshold_ratio={:.4}", model.threshold_ratio);
+        println!("  risk_label={}", model.risk_label);
+        for caveat in model.caveats {
+            println!("  note: {caveat}");
+        }
+    }
+    if raw_extcsd {
+        if let Some(raw) = report
+            .emmc
+            .ext_csd_raw
+            .as_deref()
+            .and_then(|bytes| <&[u8; 512]>::try_from(bytes).ok())
+        {
+            println!("{}", format_raw_extcsd_dump(raw));
+        } else if let Some(raw) = &report.emmc.raw_text {
+            println!("{raw}");
+        } else {
+            println!("Raw EXT_CSD dump unavailable.");
+        }
+    }
     Ok(())
 }
 
@@ -383,6 +436,122 @@ pub fn run_diag_sample(
     println!("Saved session: {}", path.display());
     println!("{}", terminal_summary(&record));
     Ok(session_id)
+}
+
+pub fn run_file_map(file: &Path, device: Option<&Path>, csv: bool) -> Result<()> {
+    let report = filemap::collect_file_map(file, device)?;
+    if csv {
+        print!("{}", filemap::filemap_report_to_csv(&report));
+        return Ok(());
+    }
+
+    println!("File: {}", report.file_path.display());
+    println!("Device: {}", report.device.display());
+    println!("Method: {}", report.method);
+    println!("Sector Size: {}", report.sector_size);
+    if let Some(start) = report.partition_start_lba {
+        println!("Partition Start LBA: {start}");
+    }
+    if let Some(erase_block_size) = report.erase_block_size {
+        println!("Erase Block Size: {erase_block_size}");
+    }
+    println!("Extents: {}", report.extent_count);
+    println!(
+        "{:<6} {:>14} {:>14} {:>12}  Flags",
+        "Index", "Logical", "Physical LBA", "Length"
+    );
+    for (index, extent) in report.extents.iter().enumerate() {
+        let physical_lba = extent.physical_offset / report.sector_size.max(1);
+        let flags = if extent.flag_names.is_empty() {
+            "-".to_string()
+        } else {
+            extent.flag_names.join("|")
+        };
+        println!(
+            "{:<6} {:>14} {:>14} {:>12}  {}",
+            index,
+            extent.logical_offset,
+            physical_lba,
+            extent.length,
+            flags
+        );
+    }
+    Ok(())
+}
+
+pub fn run_lba_trace(
+    device: &Path,
+    duration: u64,
+    lba_range: Option<&str>,
+    map_files: &[PathBuf],
+) -> Result<()> {
+    let lba_filter = lba_range.map(parse_lba_range).transpose()?;
+    let report = lba_trace::capture_lba_trace(LbaTraceOptions {
+        device: device.display().to_string(),
+        duration_secs: duration,
+        lba_filter,
+        map_files: map_files.to_vec(),
+    })?;
+    println!("Device: {}", report.device);
+    println!("Method: {}", report.method);
+    println!("Duration: {}s", report.duration_secs);
+    println!("Events: {}", report.event_count);
+    for event in &report.events {
+        let summary = if let Some(hit) = lba_trace::match_lba_to_file(event.lba, &report.owner_index)
+        {
+            format!(" -> {} @ {}", hit.file.display(), hit.offset_in_file)
+        } else {
+            String::new()
+        };
+        println!(
+            "ts={} dir={:?} lba={} sectors={}{}",
+            event.timestamp_ns, event.direction, event.lba, event.length_sectors, summary
+        );
+    }
+    Ok(())
+}
+
+pub fn run_health_compare(
+    paths: &AppPaths,
+    device: &Path,
+    fa_report: &Path,
+    trace_report: Option<&Path>,
+    html_output: Option<&Path>,
+) -> Result<()> {
+    let trace_report = match trace_report {
+        Some(path) => Some(
+            serde_json::from_str::<lba_trace::LbaTraceReport>(
+                &fs::read_to_string(path)
+                    .map_err(|err| anyhow::anyhow!("failed to read {}: {err}", path.display()))?,
+            )
+            .map_err(|err| anyhow::anyhow!("failed to parse {}: {err}", path.display()))?,
+        ),
+        None => None,
+    };
+    let report = health_compare::compare_health(
+        paths,
+        device,
+        fa_report,
+        trace_report.as_ref(),
+        None,
+    )?;
+    println!(
+        "{:<20} {:<12} {:<12} {:<10} Detail",
+        "Field", "Local", "FA", "Status"
+    );
+    for note in &report.field_comparisons {
+        println!(
+            "{:<20} {:<12} {:<12} {:<10} {}",
+            note.field, note.local_value, note.fa_value, note.status, note.detail
+        );
+    }
+    if let Some(html_output) = html_output {
+        fs::write(html_output, render_health_compare_html(&report)).map_err(|err| {
+            anyhow::anyhow!("failed to write {}: {err}", html_output.display())
+        })?;
+        println!("HTML report: {}", html_output.display());
+    }
+    Ok(())
 }
 
 pub fn run_diag_monitor(duration_seconds: u64, interval_ms: u64) -> Result<()> {
@@ -1513,7 +1682,7 @@ fn health_flow(paths: &AppPaths) -> Result<()> {
     let Some(target) = target else {
         return Ok(());
     };
-    run_health(paths, &target)
+    run_health(paths, &target, false, None, None, 100_000)
 }
 
 fn reports_flow(paths: &AppPaths) -> Result<()> {
@@ -3016,6 +3185,43 @@ fn pause() -> Result<()> {
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
     Ok(())
+}
+
+fn host_total_bytes_read(device: &Path) -> Option<u64> {
+    let name = device.file_name()?.to_string_lossy().to_string();
+    let disk_name = canonical_diskstats_name(&name);
+    let stats = diskstats_map();
+    stats
+        .get(&disk_name)
+        .and_then(|values| values.get(2).copied())
+        .map(|sectors| sectors.saturating_mul(512))
+}
+
+fn canonical_diskstats_name(name: &str) -> String {
+    if let Some(index) = name.rfind('p') {
+        if name[index + 1..].chars().all(|ch| ch.is_ascii_digit()) {
+            return name[..index].to_string();
+        }
+    }
+    name.to_string()
+}
+
+fn parse_lba_range(value: &str) -> Result<std::ops::Range<u64>> {
+    let (start, end) = value
+        .split_once('-')
+        .ok_or_else(|| anyhow::anyhow!("invalid lba range {value}; expected START-END"))?;
+    let start = start
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid lba start in {value}"))?;
+    let end = end
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid lba end in {value}"))?;
+    if end <= start {
+        anyhow::bail!("invalid lba range {value}; end must be greater than start");
+    }
+    Ok(start..end)
 }
 
 impl Spinner {
