@@ -8,6 +8,10 @@ use std::io;
 use std::os::fd::RawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
+#[cfg(target_os = "linux")]
+use std::process;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppPaths {
@@ -138,7 +142,7 @@ pub fn collect_capabilities(paths: &AppPaths) -> CapabilityReport {
         io_uring_available: io_uring_available(),
         direct_io_available: direct_io_viable(paths).unwrap_or(false),
         deep_trace_available: deep_trace_available(),
-        mmc_health_available: command_exists("mmc"),
+        mmc_health_available: mmc_health_available(),
         procfs_access: Path::new("/proc/1").exists(),
         permission_level: if unsafe { libc::geteuid() } == 0 {
             "root".to_string()
@@ -151,6 +155,10 @@ pub fn collect_capabilities(paths: &AppPaths) -> CapabilityReport {
 pub fn doctor(paths: &AppPaths) -> DoctorReport {
     let caps = collect_capabilities(paths);
     let devices = list_devices().unwrap_or_default();
+    let first_mmc = devices
+        .iter()
+        .find(|device| device.name.starts_with("mmcblk"))
+        .map(|device| device.name.as_str());
     let mut checks = Vec::new();
     checks.push(DoctorCheck {
         name: "kernel_version".to_string(),
@@ -186,9 +194,10 @@ pub fn doctor(paths: &AppPaths) -> DoctorReport {
         name: "mmc_utils".to_string(),
         ok: caps.mmc_health_available,
         detail: if caps.mmc_health_available {
-            "mmc-utils available".to_string()
+            "MMC health path available".to_string()
         } else {
-            "mmc-utils missing; health telemetry will be unavailable".to_string()
+            "no EXT_CSD path detected; mmc-utils and raw Linux MMC access are unavailable"
+                .to_string()
         },
     });
     checks.push(DoctorCheck {
@@ -209,6 +218,10 @@ pub fn doctor(paths: &AppPaths) -> DoctorReport {
             "/proc access unavailable".to_string()
         },
     });
+    checks.push(fiemap_support_check());
+    checks.push(partition_start_check(first_mmc));
+    checks.push(blktrace_support_check(first_mmc));
+    checks.push(ftl_transparency_note());
     DoctorReport {
         generated_at: Utc::now(),
         checks,
@@ -371,6 +384,22 @@ pub fn command_exists(name: &str) -> bool {
         .any(|path| path.join(name).exists())
 }
 
+fn mmc_health_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        command_exists("mmc")
+            || fs::read_dir("/sys/class/block")
+                .ok()
+                .into_iter()
+                .flat_map(|entries| entries.flatten())
+                .any(|entry| entry.file_name().to_string_lossy().starts_with("mmcblk"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        command_exists("mmc")
+    }
+}
+
 pub fn io_uring_available() -> bool {
     let disabled = read_trimmed("/proc/sys/kernel/io_uring_disabled")
         .and_then(|v| v.parse::<u64>().ok())
@@ -500,12 +529,222 @@ fn read_cpu_freq() -> Option<u64> {
     None
 }
 
-fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
+pub(crate) fn read_trimmed(path: impl AsRef<Path>) -> Option<String> {
     fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
+
+fn fiemap_support_check() -> DoctorCheck {
+    #[cfg(target_os = "linux")]
+    {
+        match fiemap_support_check_linux() {
+            Ok(check) => check,
+            Err(err) => DoctorCheck {
+                name: "fiemap_support".to_string(),
+                ok: false,
+                detail: format!("FIEMAP probe failed: {err:#}"),
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        DoctorCheck {
+            name: "fiemap_support".to_string(),
+            ok: false,
+            detail: "FIEMAP is Linux-only".to_string(),
+        }
+    }
+}
+
+fn partition_start_check(device: Option<&str>) -> DoctorCheck {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(device) = device else {
+            return DoctorCheck {
+                name: "partition_start_lba".to_string(),
+                ok: false,
+                detail: "no mmcblk device found under /sys/class/block".to_string(),
+            };
+        };
+        let base = PathBuf::from("/sys/class/block").join(device);
+        let Ok(entries) = fs::read_dir(&base) else {
+            return DoctorCheck {
+                name: "partition_start_lba".to_string(),
+                ok: false,
+                detail: format!("unable to inspect {}", base.display()),
+            };
+        };
+        let mut starts = Vec::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with(device) || name == device {
+                continue;
+            }
+            if let Some(start) = read_trimmed(entry.path().join("start")) {
+                starts.push(format!("{name}={start}"));
+            }
+        }
+        DoctorCheck {
+            name: "partition_start_lba".to_string(),
+            ok: !starts.is_empty(),
+            detail: if starts.is_empty() {
+                format!("no readable partition starts under {}", base.display())
+            } else {
+                starts.join(", ")
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device;
+        DoctorCheck {
+            name: "partition_start_lba".to_string(),
+            ok: false,
+            detail: "partition start probing is Linux-only".to_string(),
+        }
+    }
+}
+
+fn ftl_transparency_note() -> DoctorCheck {
+    DoctorCheck {
+        name: "ftl_transparency".to_string(),
+        ok: true,
+        detail: "All host-side addresses are logical LBAs, not physical NAND locations. This is a fundamental constraint of all userspace eMMC tooling.".to_string(),
+    }
+}
+
+fn blktrace_support_check(device: Option<&str>) -> DoctorCheck {
+    #[cfg(target_os = "linux")]
+    {
+        let debugfs = Path::new("/sys/kernel/debug/block");
+        let has_blktrace = command_exists("blktrace");
+        let detail = if !has_blktrace {
+            "install blktrace to enable block-layer trace capture".to_string()
+        } else if !debugfs.exists() {
+            "mount debugfs at /sys/kernel/debug to inspect block trace support".to_string()
+        } else if let Some(device) = device {
+            let trace_dir = debugfs.join(device);
+            if trace_dir.exists() {
+                format!("available for {device}; requires debugfs access and root")
+            } else {
+                format!(
+                    "debugfs is mounted, but {} is missing; kernel trace hooks may be disabled",
+                    trace_dir.display()
+                )
+            }
+        } else {
+            "debugfs is mounted and blktrace is installed".to_string()
+        };
+        let ok = has_blktrace
+            && debugfs.exists()
+            && device
+                .map(|name| debugfs.join(name).exists())
+                .unwrap_or(true);
+        DoctorCheck {
+            name: "blktrace_support".to_string(),
+            ok,
+            detail,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device;
+        DoctorCheck {
+            name: "blktrace_support".to_string(),
+            ok: false,
+            detail: "blktrace capture is Linux-only".to_string(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fiemap_support_check_linux() -> Result<DoctorCheck> {
+    let probe_path = env::temp_dir().join(format!("emmc-lab-fiemap-probe-{}", process::id()));
+    fs::write(&probe_path, b"probe")
+        .with_context(|| format!("failed to create {}", probe_path.display()))?;
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&probe_path)
+        .with_context(|| format!("failed to open {}", probe_path.display()))?;
+    let mut request = FiemapProbe {
+        fm_start: 0,
+        fm_length: !0_u64,
+        fm_flags: 0,
+        fm_mapped_extents: 0,
+        fm_extent_count: 0,
+        fm_reserved: 0,
+    };
+    let rc = unsafe { libc::ioctl(file.as_raw_fd(), FS_IOC_FIEMAP, &mut request) };
+    let _ = fs::remove_file(&probe_path);
+    if rc == 0 {
+        return Ok(DoctorCheck {
+            name: "fiemap_support".to_string(),
+            ok: true,
+            detail: "FIEMAP ioctl accepted on the current filesystem".to_string(),
+        });
+    }
+    let err = io::Error::last_os_error();
+    let detail = if err.raw_os_error() == Some(libc::EOPNOTSUPP) {
+        "current filesystem returned EOPNOTSUPP for FIEMAP".to_string()
+    } else {
+        format!("FIEMAP ioctl failed: {err}")
+    };
+    Ok(DoctorCheck {
+        name: "fiemap_support".to_string(),
+        ok: false,
+        detail,
+    })
+}
+
+#[cfg(target_os = "linux")]
+const IOC_WRITE: u32 = 1;
+#[cfg(target_os = "linux")]
+const IOC_READ: u32 = 2;
+#[cfg(target_os = "linux")]
+const IOC_NRBITS: u32 = 8;
+#[cfg(target_os = "linux")]
+const IOC_TYPEBITS: u32 = 8;
+#[cfg(target_os = "linux")]
+const IOC_SIZEBITS: u32 = 14;
+#[cfg(target_os = "linux")]
+const IOC_NRSHIFT: u32 = 0;
+#[cfg(target_os = "linux")]
+const IOC_TYPESHIFT: u32 = IOC_NRSHIFT + IOC_NRBITS;
+#[cfg(target_os = "linux")]
+const IOC_SIZESHIFT: u32 = IOC_TYPESHIFT + IOC_TYPEBITS;
+#[cfg(target_os = "linux")]
+const IOC_DIRSHIFT: u32 = IOC_SIZESHIFT + IOC_SIZEBITS;
+
+#[cfg(target_os = "linux")]
+const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
+    ((dir << IOC_DIRSHIFT)
+        | (ty << IOC_TYPESHIFT)
+        | (nr << IOC_NRSHIFT)
+        | (size << IOC_SIZESHIFT)) as libc::c_ulong
+}
+
+#[cfg(target_os = "linux")]
+const fn iowr(ty: u32, nr: u32, size: u32) -> libc::c_ulong {
+    ioc(IOC_READ | IOC_WRITE, ty, nr, size)
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct FiemapProbe {
+    fm_start: u64,
+    fm_length: u64,
+    fm_flags: u32,
+    fm_mapped_extents: u32,
+    fm_extent_count: u32,
+    fm_reserved: u32,
+}
+
+#[cfg(target_os = "linux")]
+const FS_IOC_FIEMAP: libc::c_ulong =
+    iowr(b'f' as u32, 11, std::mem::size_of::<FiemapProbe>() as u32);
 
 fn close_fd(fd: RawFd) {
     if fd >= 0 {

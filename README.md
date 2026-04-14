@@ -5,11 +5,11 @@
 - eMMC and file-backed workload testing
 - exact operation-count random and sequential I/O runs
 - live procfs-based I/O diagnostics
-- eMMC health snapshots through `mmc-utils` when available
+- eMMC health snapshots through direct EXT_CSD access with `mmc-utils` fallback
 - JSON, CSV, and HTML reporting
 - an SSH-friendly interactive menu plus direct automation commands
 
-Current release: `v0.2.4`
+Current release: `v0.2.5`
 
 License: [MIT](LICENSE)
 
@@ -56,7 +56,7 @@ Diagnostic mode works in two levels:
 - logical sector range targeting and byte-range targeting
 - separate logical syscall bytes and storage-layer bytes in diagnostics
 - best-effort `fdinfo`-backed file context and unattributed device-I/O totals in diagnostics
-- health snapshots with graceful fallback when `mmc-utils` is missing
+- health snapshots with direct EXT_CSD parsing and graceful `mmc-utils` fallback when raw access is unavailable
 - lightweight persistence without an external database
 - optional embedded SQLite feature flag
 - Debian-family self-deploy installer, including Raspberry Pi OS
@@ -310,7 +310,7 @@ Mandatory runtime inputs:
 
 Optional runtime tools:
 
-- `mmc-utils` for EXT_CSD health
+- `mmc-utils` as the final EXT_CSD fallback path
 - kernel tracing or eBPF support for deep tracing
 - `fio` for optional comparison workflows
 
@@ -318,7 +318,7 @@ If an optional feature is unavailable, `emmc-lab` reports that clearly and falls
 
 ## Versioning and Releases
 
-- Crate version: `0.2.4`
+- Crate version: `0.2.5`
 - License: `MIT`
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - GitHub releases: [Releases](https://github.com/nbeathoven/emmc-lab/releases)

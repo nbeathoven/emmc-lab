@@ -38,6 +38,42 @@ enum Commands {
     Health {
         #[arg(long)]
         device: PathBuf,
+        #[arg(long, default_value_t = false)]
+        raw_extcsd: bool,
+        #[arg(long)]
+        page_size_kb: Option<u64>,
+        #[arg(long)]
+        pages_per_block: Option<u64>,
+        #[arg(long, default_value_t = 100_000)]
+        read_disturb_threshold: u64,
+    },
+    FileMap {
+        #[arg()]
+        file: PathBuf,
+        #[arg(long)]
+        device: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        csv: bool,
+    },
+    LbaTrace {
+        #[arg(long)]
+        device: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        duration: u64,
+        #[arg(long)]
+        lba_range: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        map_files: Vec<PathBuf>,
+    },
+    HealthCompare {
+        #[arg(long)]
+        device: PathBuf,
+        #[arg(long)]
+        fa_report: PathBuf,
+        #[arg(long)]
+        trace_report: Option<PathBuf>,
+        #[arg(long)]
+        html: Option<PathBuf>,
     },
     Diag {
         #[command(subcommand)]
@@ -104,7 +140,41 @@ pub fn run() -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Health { device }) => app::run_health(&paths, &device),
+        Some(Commands::Health {
+            device,
+            raw_extcsd,
+            page_size_kb,
+            pages_per_block,
+            read_disturb_threshold,
+        }) => app::run_health(
+            &paths,
+            &device,
+            raw_extcsd,
+            page_size_kb,
+            pages_per_block,
+            read_disturb_threshold,
+        ),
+        Some(Commands::FileMap { file, device, csv }) => {
+            app::run_file_map(&file, device.as_deref(), csv)
+        }
+        Some(Commands::LbaTrace {
+            device,
+            duration,
+            lba_range,
+            map_files,
+        }) => app::run_lba_trace(&device, duration, lba_range.as_deref(), &map_files),
+        Some(Commands::HealthCompare {
+            device,
+            fa_report,
+            trace_report,
+            html,
+        }) => app::run_health_compare(
+            &paths,
+            &device,
+            &fa_report,
+            trace_report.as_deref(),
+            html.as_deref(),
+        ),
         Some(Commands::Diag { command }) => match command {
             DiagCommand::Monitor {
                 duration,
