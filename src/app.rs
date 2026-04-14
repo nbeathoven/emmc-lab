@@ -292,9 +292,11 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
     );
 
     if profile.telemetry.health_telemetry {
-        record.health_before = Some(with_spinner("Collecting pre-run health", || {
-            read_emmc_health(&profile.target.path, None, None)
-        })?);
+        let target_label = operator_target_label(&profile.target.path);
+        record.health_before = Some(with_spinner(
+            &format!("Collecting pre-run health for {target_label}"),
+            || read_emmc_health(&profile.target.path, None, None),
+        )?);
     }
 
     let stop_signal = Arc::new(AtomicBool::new(false));
@@ -309,14 +311,20 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
         None
     };
 
-    let (run_summary, intervals) = with_spinner("Running workload", || execute_profile(&profile))?;
+    let target_label = operator_target_label(&profile.target.path);
+    let (run_summary, intervals) =
+        with_spinner(&format!("Running workload on {target_label}"), || {
+            execute_profile(&profile)
+        })?;
     record.run_summary = Some(run_summary);
     record.interval_stats = intervals;
 
     if profile.telemetry.health_telemetry {
-        record.health_after = Some(with_spinner("Collecting post-run health", || {
-            read_emmc_health(&profile.target.path, None, None)
-        })?);
+        let target_label = operator_target_label(&profile.target.path);
+        record.health_after = Some(with_spinner(
+            &format!("Collecting post-run health for {target_label}"),
+            || read_emmc_health(&profile.target.path, None, None),
+        )?);
     }
 
     if let Some(handle) = diag_handle {
@@ -368,7 +376,8 @@ pub fn run_health(
     pages_per_block: Option<u64>,
     read_disturb_threshold: u64,
 ) -> Result<()> {
-    let report = with_spinner("Collecting health", || {
+    let target_label = operator_target_label(device);
+    let report = with_spinner(&format!("Collecting health for {target_label}"), || {
         collect_health(paths, device, page_size_kb, pages_per_block)
     })?;
     println!("{}", render_health_report(&report));
@@ -469,11 +478,7 @@ pub fn run_file_map(file: &Path, device: Option<&Path>, csv: bool) -> Result<()>
         };
         println!(
             "{:<6} {:>14} {:>14} {:>12}  {}",
-            index,
-            extent.logical_offset,
-            physical_lba,
-            extent.length,
-            flags
+            index, extent.logical_offset, physical_lba, extent.length, flags
         );
     }
     Ok(())
@@ -497,12 +502,12 @@ pub fn run_lba_trace(
     println!("Duration: {}s", report.duration_secs);
     println!("Events: {}", report.event_count);
     for event in &report.events {
-        let summary = if let Some(hit) = lba_trace::match_lba_to_file(event.lba, &report.owner_index)
-        {
-            format!(" -> {} @ {}", hit.file.display(), hit.offset_in_file)
-        } else {
-            String::new()
-        };
+        let summary =
+            if let Some(hit) = lba_trace::match_lba_to_file(event.lba, &report.owner_index) {
+                format!(" -> {} @ {}", hit.file.display(), hit.offset_in_file)
+            } else {
+                String::new()
+            };
         println!(
             "ts={} dir={:?} lba={} sectors={}{}",
             event.timestamp_ns, event.direction, event.lba, event.length_sectors, summary
@@ -528,13 +533,8 @@ pub fn run_health_compare(
         ),
         None => None,
     };
-    let report = health_compare::compare_health(
-        paths,
-        device,
-        fa_report,
-        trace_report.as_ref(),
-        None,
-    )?;
+    let report =
+        health_compare::compare_health(paths, device, fa_report, trace_report.as_ref(), None)?;
     println!(
         "{:<20} {:<12} {:<12} {:<10} Detail",
         "Field", "Local", "FA", "Status"
@@ -546,9 +546,8 @@ pub fn run_health_compare(
         );
     }
     if let Some(html_output) = html_output {
-        fs::write(html_output, render_health_compare_html(&report)).map_err(|err| {
-            anyhow::anyhow!("failed to write {}: {err}", html_output.display())
-        })?;
+        fs::write(html_output, render_health_compare_html(&report))
+            .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", html_output.display()))?;
         println!("HTML report: {}", html_output.display());
     }
     Ok(())
@@ -1413,6 +1412,10 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
                     .to_string(),
                 ),
                 ("Profile".to_string(), profile.name.clone()),
+                (
+                    "Target".to_string(),
+                    operator_target_label(&profile.target.path),
+                ),
             ],
             &[
                 SelectorColumn {
@@ -1899,6 +1902,39 @@ fn short_target_label(path: &Path) -> String {
         .filter(|name| !name.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| path.display().to_string())
+}
+
+fn operator_target_label(path: &Path) -> String {
+    let path_text = path.display().to_string();
+    let Some(device) = list_devices()
+        .ok()
+        .and_then(|devices| devices.into_iter().find(|device| device.path == path))
+    else {
+        return path_text;
+    };
+
+    if device.is_partition {
+        if let Some(mount) = device.mountpoints.first().filter(|value| !value.is_empty()) {
+            return format!("{path_text} [partition {mount}]");
+        }
+        if let Some(parent) = device.parent.as_deref().filter(|value| !value.is_empty()) {
+            return format!("{path_text} [partition of {parent}]");
+        }
+        return format!("{path_text} [partition]");
+    }
+
+    if let Some(model) = device
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return format!("{path_text} [device {model}]");
+    }
+
+    match device.media_type.as_deref() {
+        Some(kind) if !kind.trim().is_empty() => format!("{path_text} [device {kind}]"),
+        _ => format!("{path_text} [device]"),
+    }
 }
 
 fn run_profile_session_interactive(paths: &AppPaths, profile: Profile) -> Result<()> {
@@ -3440,8 +3476,7 @@ mod tests {
     use super::{
         adjusted_block_size, block_size_floor, device_rank, format_bytes, format_grouped_u64,
         is_auxiliary_device, is_single_sector_target, normalize_block_size,
-        normalize_file_target_path, parse_yes_no,
-        PromptBuffer,
+        normalize_file_target_path, parse_yes_no, PromptBuffer,
     };
     use crate::profile::{AddressingMode, Profile, TargetMode};
     use crate::system::DeviceInfo;
