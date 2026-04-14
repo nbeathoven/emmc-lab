@@ -92,8 +92,8 @@ pub fn compare_health(
 
 /// Load and validate the FA JSON schema.
 fn load_fa_report(path: &Path) -> Result<FaReport> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let report: FaReport = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     if report.schema_version != "1.0" {
@@ -146,7 +146,10 @@ fn compare_numeric_field(field: &str, local: Option<u8>, fa: Option<u8>) -> Comp
     };
     let detail = match status {
         "match" => "live device agrees with the FA snapshot".to_string(),
-        "worse" => "live value is higher than the FA snapshot and indicates additional wear or pressure".to_string(),
+        "worse" => {
+            "live value is higher than the FA snapshot and indicates additional wear or pressure"
+                .to_string()
+        }
         "drift" => "live value differs from the FA snapshot but is not higher".to_string(),
         _ => "one side did not provide a comparable value".to_string(),
     };
@@ -165,7 +168,9 @@ fn parse_hexish_u8(value: Option<&str>) -> Option<u8> {
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
         .unwrap_or(value);
-    u8::from_str_radix(value, 16).ok().or_else(|| value.parse::<u8>().ok())
+    u8::from_str_radix(value, 16)
+        .ok()
+        .or_else(|| value.parse::<u8>().ok())
 }
 
 /// Correlate FA bad-block LBA ranges with observed trace traffic.
@@ -186,8 +191,8 @@ fn correlate_block_ranges(
                 continue;
             }
             matched = true;
-            total_overlapping_lbas = total_overlapping_lbas
-                .saturating_add(overlap_end.saturating_sub(overlap_start));
+            total_overlapping_lbas =
+                total_overlapping_lbas.saturating_add(overlap_end.saturating_sub(overlap_start));
             overlapping_ranges.push(CorrelationHit {
                 lba_range: (overlap_start, overlap_end),
                 failure_type: bad_range.failure_type.clone(),

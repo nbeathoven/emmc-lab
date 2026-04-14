@@ -3,6 +3,7 @@ pub mod cli;
 pub mod diagnostics;
 pub mod engine;
 pub mod filemap;
+pub mod geometry;
 pub mod health;
 pub mod health_compare;
 pub mod lba_trace;

@@ -3,6 +3,7 @@ use crate::diagnostics::{
 };
 use crate::engine::execute_profile;
 use crate::filemap;
+use crate::geometry::collect_block_geometry;
 use crate::health::{
     build_read_disturb_model, collect_health, format_raw_extcsd_dump, read_emmc_health,
     ReadDisturbInput,
@@ -24,10 +25,10 @@ use crate::system::{
     diskstats_map, doctor, list_devices, logical_block_size, AppPaths, DeviceInfo,
 };
 use crate::ui::{
-    render_device_list, render_doctor_report, render_health_report, render_live_monitor,
-    render_selector_screen, render_settings, SelectorColumn, SelectorRow,
+    render_device_geometry, render_device_list, render_doctor_report, render_health_report,
+    render_live_monitor, render_selector_screen, render_settings, SelectorColumn, SelectorRow,
 };
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::{Local, Utc};
 use std::env;
 use std::ffi::CString;
@@ -646,6 +647,13 @@ pub fn run_list_devices() -> Result<()> {
 pub fn run_doctor(paths: &AppPaths) -> Result<()> {
     let report = with_spinner("Running doctor checks", || doctor(paths));
     println!("{}", render_doctor_report(&report));
+    Ok(())
+}
+
+pub fn run_geometry(device: &Path) -> Result<()> {
+    let geometry = collect_block_geometry(device)?
+        .ok_or_else(|| anyhow!("no geometry data available for {}", device.display()))?;
+    println!("{}", render_device_geometry(&geometry));
     Ok(())
 }
 

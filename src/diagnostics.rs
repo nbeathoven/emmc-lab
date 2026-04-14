@@ -95,6 +95,52 @@ pub struct DeviceSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
+pub struct BlockStats {
+    pub device: String,
+    pub timestamp: DateTime<Utc>,
+    pub reads_completed: u64,
+    pub reads_merged: u64,
+    pub sectors_read: u64,
+    pub read_time_ms: u64,
+    pub writes_completed: u64,
+    pub writes_merged: u64,
+    pub sectors_written: u64,
+    pub write_time_ms: u64,
+    pub ios_in_progress: u64,
+    pub io_time_ms: u64,
+    pub weighted_io_time_ms: u64,
+    pub discards_completed: Option<u64>,
+    pub discards_merged: Option<u64>,
+    pub sectors_discarded: Option<u64>,
+    pub discard_time_ms: Option<u64>,
+    pub flush_requests: Option<u64>,
+    pub flush_time_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct BlockStatsDelta {
+    pub device: String,
+    pub interval_ms: u64,
+    pub read_iops: f64,
+    pub write_iops: f64,
+    pub discard_iops: Option<f64>,
+    pub flush_rate: Option<f64>,
+    pub read_throughput_bytes_per_sec: f64,
+    pub write_throughput_bytes_per_sec: f64,
+    pub read_merge_ratio: f64,
+    pub write_merge_ratio: f64,
+    pub avg_read_await_ms: f64,
+    pub avg_write_await_ms: f64,
+    pub avg_discard_await_ms: Option<f64>,
+    pub avg_flush_await_ms: Option<f64>,
+    pub avg_queue_depth: f64,
+    pub utilization_percent: f64,
+    pub raw: BlockStats,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct RestrictedProcessSummary {
     pub pid: i32,
     pub ppid: i32,
@@ -126,6 +172,8 @@ pub struct DiagnosticReport {
     pub top_directories: Vec<DirectorySummary>,
     #[serde(default)]
     pub device_totals: Vec<DeviceSummary>,
+    #[serde(default)]
+    pub block_stats_timeline: Vec<BlockStatsDelta>,
     #[serde(default)]
     pub restricted_process_count: u64,
     #[serde(default)]
@@ -227,10 +275,13 @@ pub struct LiveSamplerState {
     started: Instant,
     prev: HashMap<i32, ProcIo>,
     start_devices: HashMap<String, Vec<u64>>,
+    prev_block_stats: HashMap<String, BlockStats>,
     per_pid: HashMap<i32, ProcAgg>,
     file_map: BTreeMap<String, FileSummary>,
     restricted_processes: HashMap<i32, RestrictedProcessSummary>,
     unresolved_path_count: u64,
+    block_stats_timeline: Vec<BlockStatsDelta>,
+    last_sample_at: Instant,
 }
 
 pub fn run_live_sampler(
@@ -249,10 +300,13 @@ impl LiveSamplerState {
             started: Instant::now(),
             prev: snapshot_procfs()?.accessible,
             start_devices: diskstats_map(),
+            prev_block_stats: snapshot_block_stats(),
             per_pid: HashMap::new(),
             file_map: BTreeMap::new(),
             restricted_processes: HashMap::new(),
             unresolved_path_count: 0,
+            block_stats_timeline: Vec::new(),
+            last_sample_at: Instant::now(),
         })
     }
 
@@ -273,6 +327,13 @@ impl LiveSamplerState {
         for process in current.restricted {
             self.restricted_processes.insert(process.pid, process);
         }
+        let block_snapshot = snapshot_block_stats();
+        let interval_ms = self.last_sample_at.elapsed().as_millis().max(1) as u64;
+        let mut deltas =
+            summarize_block_stats_deltas(&self.prev_block_stats, &block_snapshot, interval_ms);
+        self.block_stats_timeline.append(&mut deltas);
+        self.prev_block_stats = block_snapshot;
+        self.last_sample_at = Instant::now();
         self.prev = current.accessible;
         Ok(build_sampler_report(
             self.session_id.clone(),
@@ -283,6 +344,7 @@ impl LiveSamplerState {
             &self.restricted_processes,
             self.unresolved_path_count,
             self.start_devices.clone(),
+            &self.block_stats_timeline,
         ))
     }
 }
@@ -317,6 +379,7 @@ fn run_live_sampler_internal(
             top_files: vec![],
             top_directories: vec![],
             device_totals: vec![],
+            block_stats_timeline: vec![],
             restricted_process_count: 0,
             kernel_process_count: 0,
             restricted_processes: vec![],
@@ -347,6 +410,7 @@ fn run_live_sampler_internal(
         &state.restricted_processes,
         state.unresolved_path_count,
         state.start_devices.clone(),
+        &state.block_stats_timeline,
     );
 
     while state.started.elapsed() < duration
@@ -507,6 +571,7 @@ fn build_sampler_report(
     restricted_processes: &HashMap<i32, RestrictedProcessSummary>,
     unresolved_path_count: u64,
     start_devices: HashMap<String, Vec<u64>>,
+    block_stats_timeline: &[BlockStatsDelta],
 ) -> DiagnosticReport {
     let elapsed_secs = started.elapsed().as_secs().max(1);
     let observed_storage_read_bytes = per_pid.values().map(|p| p.storage_read_bytes).sum::<u64>();
@@ -612,6 +677,7 @@ fn build_sampler_report(
         top_files: files,
         top_directories: directories,
         device_totals: devices,
+        block_stats_timeline: block_stats_timeline.to_vec(),
         restricted_process_count: restricted_processes.len() as u64,
         kernel_process_count,
         restricted_processes: restricted,
@@ -656,6 +722,7 @@ pub fn run_deep_trace(
             top_files: vec![],
             top_directories: vec![],
             device_totals: vec![],
+            block_stats_timeline: vec![],
             restricted_process_count: 0,
             kernel_process_count: 0,
             restricted_processes: vec![],
@@ -957,6 +1024,180 @@ fn summarize_devices(
     summaries
 }
 
+fn snapshot_block_stats() -> HashMap<String, BlockStats> {
+    let now = Utc::now();
+    let mut out = HashMap::new();
+    for (device, values) in diskstats_map() {
+        if let Some(stats) = block_stats_from_values(&device, &values, now) {
+            out.insert(device, stats);
+        }
+    }
+    out
+}
+
+fn block_stats_from_values(
+    device: &str,
+    values: &[u64],
+    timestamp: DateTime<Utc>,
+) -> Option<BlockStats> {
+    if values.len() < 11 {
+        return None;
+    }
+    Some(BlockStats {
+        device: device.to_string(),
+        timestamp,
+        reads_completed: values[0],
+        reads_merged: values[1],
+        sectors_read: values[2],
+        read_time_ms: values[3],
+        writes_completed: values[4],
+        writes_merged: values[5],
+        sectors_written: values[6],
+        write_time_ms: values[7],
+        ios_in_progress: values[8],
+        io_time_ms: values[9],
+        weighted_io_time_ms: values[10],
+        discards_completed: values.get(11).copied(),
+        discards_merged: values.get(12).copied(),
+        sectors_discarded: values.get(13).copied(),
+        discard_time_ms: values.get(14).copied(),
+        flush_requests: values.get(15).copied(),
+        flush_time_ms: values.get(16).copied(),
+    })
+}
+
+fn summarize_block_stats_deltas(
+    prev: &HashMap<String, BlockStats>,
+    current: &HashMap<String, BlockStats>,
+    interval_ms: u64,
+) -> Vec<BlockStatsDelta> {
+    let sector_sizes = list_devices()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|device| {
+            (
+                device.name,
+                device
+                    .geometry
+                    .as_ref()
+                    .map(|geometry| geometry.logical_block_size)
+                    .or(device.logical_block_size),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    let mut deltas = current
+        .iter()
+        .filter_map(|(device, after)| {
+            let before = prev.get(device)?;
+            Some(compute_block_stats_delta(
+                before,
+                after,
+                interval_ms,
+                sector_sizes.get(device).copied().flatten().unwrap_or(512),
+            ))
+        })
+        .collect::<Vec<_>>();
+    deltas.sort_by(|a, b| {
+        b.utilization_percent
+            .partial_cmp(&a.utilization_percent)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| {
+                b.write_throughput_bytes_per_sec
+                    .partial_cmp(&a.write_throughput_bytes_per_sec)
+                    .unwrap_or(Ordering::Equal)
+            })
+    });
+    deltas.truncate(64);
+    deltas
+}
+
+fn compute_block_stats_delta(
+    prev: &BlockStats,
+    curr: &BlockStats,
+    interval_ms: u64,
+    sector_size: u64,
+) -> BlockStatsDelta {
+    let secs = interval_ms.max(1) as f64 / 1000.0;
+    let delta_reads = curr.reads_completed.saturating_sub(prev.reads_completed);
+    let delta_reads_merged = curr.reads_merged.saturating_sub(prev.reads_merged);
+    let delta_sectors_read = curr.sectors_read.saturating_sub(prev.sectors_read);
+    let delta_read_time_ms = curr.read_time_ms.saturating_sub(prev.read_time_ms);
+    let delta_writes = curr.writes_completed.saturating_sub(prev.writes_completed);
+    let delta_writes_merged = curr.writes_merged.saturating_sub(prev.writes_merged);
+    let delta_sectors_written = curr.sectors_written.saturating_sub(prev.sectors_written);
+    let delta_write_time_ms = curr.write_time_ms.saturating_sub(prev.write_time_ms);
+    let delta_io_time_ms = curr.io_time_ms.saturating_sub(prev.io_time_ms);
+    let delta_weighted_io_time_ms = curr
+        .weighted_io_time_ms
+        .saturating_sub(prev.weighted_io_time_ms);
+    let delta_discards = curr
+        .discards_completed
+        .zip(prev.discards_completed)
+        .map(|(after, before)| after.saturating_sub(before));
+    let delta_discard_time = curr
+        .discard_time_ms
+        .zip(prev.discard_time_ms)
+        .map(|(after, before)| after.saturating_sub(before));
+    let delta_flushes = curr
+        .flush_requests
+        .zip(prev.flush_requests)
+        .map(|(after, before)| after.saturating_sub(before));
+    let delta_flush_time = curr
+        .flush_time_ms
+        .zip(prev.flush_time_ms)
+        .map(|(after, before)| after.saturating_sub(before));
+
+    BlockStatsDelta {
+        device: curr.device.clone(),
+        interval_ms,
+        read_iops: delta_reads as f64 / secs,
+        write_iops: delta_writes as f64 / secs,
+        discard_iops: delta_discards.map(|value| value as f64 / secs),
+        flush_rate: delta_flushes.map(|value| value as f64 / secs),
+        read_throughput_bytes_per_sec: delta_sectors_read.saturating_mul(sector_size) as f64 / secs,
+        write_throughput_bytes_per_sec: delta_sectors_written.saturating_mul(sector_size) as f64
+            / secs,
+        read_merge_ratio: merge_ratio(delta_reads_merged, delta_reads),
+        write_merge_ratio: merge_ratio(delta_writes_merged, delta_writes),
+        avg_read_await_ms: average_ms(delta_read_time_ms, delta_reads),
+        avg_write_await_ms: average_ms(delta_write_time_ms, delta_writes),
+        avg_discard_await_ms: average_ms_opt(delta_discard_time, delta_discards),
+        avg_flush_await_ms: average_ms_opt(delta_flush_time, delta_flushes),
+        avg_queue_depth: delta_weighted_io_time_ms as f64 / interval_ms.max(1) as f64,
+        utilization_percent: ((delta_io_time_ms as f64 / interval_ms.max(1) as f64) * 100.0)
+            .min(100.0),
+        raw: curr.clone(),
+    }
+}
+
+fn merge_ratio(merged: u64, completed: u64) -> f64 {
+    let total = merged.saturating_add(completed);
+    if total == 0 {
+        0.0
+    } else {
+        merged as f64 / total as f64
+    }
+}
+
+fn average_ms(total_ms: u64, completed: u64) -> f64 {
+    if completed == 0 {
+        0.0
+    } else {
+        total_ms as f64 / completed as f64
+    }
+}
+
+fn average_ms_opt(total_ms: Option<u64>, completed: Option<u64>) -> Option<f64> {
+    let (Some(total_ms), Some(completed)) = (total_ms, completed) else {
+        return None;
+    };
+    if completed == 0 {
+        Some(0.0)
+    } else {
+        Some(total_ms as f64 / completed as f64)
+    }
+}
+
 fn summarize_device_storage_totals(devices: &[DeviceSummary]) -> (u64, u64) {
     let top_level = list_devices()
         .ok()
@@ -1044,8 +1285,9 @@ fn sort_processes(a: &ProcessSummary, b: &ProcessSummary) -> Ordering {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_open_flags, is_kernel_like_command, parse_fdinfo, parse_kv, summarize_directories,
-        summarize_kernel_activity, DiagnosticReport, FileSummary, RestrictedProcessSummary,
+        compute_block_stats_delta, format_open_flags, is_kernel_like_command, parse_fdinfo,
+        parse_kv, summarize_directories, summarize_kernel_activity, BlockStats, DiagnosticReport,
+        FileSummary, RestrictedProcessSummary,
     };
     use chrono::{TimeZone, Utc};
 
@@ -1143,5 +1385,41 @@ mod tests {
         assert_eq!(report.top_processes[0].logical_read_bytes, 0);
         assert_eq!(report.restricted_process_count, 0);
         assert!(report.attribution_note.is_empty());
+    }
+
+    #[test]
+    fn computes_block_stats_delta_rates() {
+        let prev = BlockStats {
+            device: "mmcblk0".to_string(),
+            reads_completed: 100,
+            sectors_read: 1000,
+            read_time_ms: 200,
+            writes_completed: 50,
+            sectors_written: 500,
+            write_time_ms: 100,
+            io_time_ms: 400,
+            weighted_io_time_ms: 500,
+            ..BlockStats::default()
+        };
+        let curr = BlockStats {
+            device: "mmcblk0".to_string(),
+            reads_completed: 110,
+            sectors_read: 1016,
+            read_time_ms: 220,
+            writes_completed: 58,
+            sectors_written: 532,
+            write_time_ms: 140,
+            io_time_ms: 460,
+            weighted_io_time_ms: 620,
+            ..BlockStats::default()
+        };
+        let delta = compute_block_stats_delta(&prev, &curr, 1000, 512);
+        assert_eq!(delta.device, "mmcblk0");
+        assert_eq!(delta.read_iops, 10.0);
+        assert_eq!(delta.write_iops, 8.0);
+        assert_eq!(delta.read_throughput_bytes_per_sec, 16.0 * 512.0);
+        assert_eq!(delta.write_throughput_bytes_per_sec, 32.0 * 512.0);
+        assert_eq!(delta.avg_queue_depth, 0.12);
+        assert_eq!(delta.utilization_percent, 6.0);
     }
 }

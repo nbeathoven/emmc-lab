@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
+use crate::system::read_trimmed;
+#[cfg(target_os = "linux")]
 use std::fs::{self, File};
 #[cfg(target_os = "linux")]
 use std::io;
@@ -15,8 +17,6 @@ use std::io;
 use std::mem::size_of;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
-use crate::system::read_trimmed;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -251,7 +251,10 @@ fn is_mmc_device(device: &Path) -> bool {
 }
 
 fn canonical_mmc_device_path(device: &Path) -> PathBuf {
-    let Some(name) = device.file_name().map(|value| value.to_string_lossy().to_string()) else {
+    let Some(name) = device
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+    else {
         return device.to_path_buf();
     };
     if !name.starts_with("mmcblk") {
@@ -354,7 +357,9 @@ pub fn build_read_disturb_model(input: ReadDisturbInput) -> ReadDisturbModel {
         .page_size_kb
         .saturating_mul(1024)
         .saturating_mul(input.pages_per_block);
-    if block_size_bytes == 0 || input.device_capacity_bytes == 0 || input.read_disturb_threshold == 0
+    if block_size_bytes == 0
+        || input.device_capacity_bytes == 0
+        || input.read_disturb_threshold == 0
     {
         caveats.push(
             "One or more required geometry inputs was zero, so the estimate could not be normalized."
@@ -405,12 +410,8 @@ fn cache_confirmed_absent(raw: &[u8; 512]) -> bool {
 #[cfg(target_os = "linux")]
 fn read_cid_sysfs(device: &Path) -> Result<CidInfo> {
     let sys_dir = block_device_sys_dir(device);
-    let raw_hex = read_trimmed(sys_dir.join("device/cid")).ok_or_else(|| {
-        anyhow!(
-            "missing CID sysfs entry for {}",
-            device.display()
-        )
-    })?;
+    let raw_hex = read_trimmed(sys_dir.join("device/cid"))
+        .ok_or_else(|| anyhow!("missing CID sysfs entry for {}", device.display()))?;
     let mid = read_trimmed(sys_dir.join("device/manfid"))
         .and_then(|value| parse_sysfs_hex_u64(&value))
         .map(|value| value as u8)
@@ -573,7 +574,10 @@ fn read_ext_csd_debugfs(device: &Path) -> Result<[u8; 512]> {
         .map(|value| value.to_string_lossy().to_string())
         .ok_or_else(|| anyhow!("failed to derive MMC card from sysfs path"))?;
     let candidates = [
-        PathBuf::from("/sys/kernel/debug").join(&host).join(&card).join("ext_csd"),
+        PathBuf::from("/sys/kernel/debug")
+            .join(&host)
+            .join(&card)
+            .join("ext_csd"),
         PathBuf::from("/sys/kernel/debug")
             .join("mmc")
             .join(&host)
@@ -624,7 +628,9 @@ fn read_csd_structure_sysfs(device: &Path) -> Result<Option<u8>> {
     let Some(first) = csd.chars().next() else {
         return Ok(None);
     };
-    let nibble = first.to_digit(16).ok_or_else(|| anyhow!("invalid CSD hex"))?;
+    let nibble = first
+        .to_digit(16)
+        .ok_or_else(|| anyhow!("invalid CSD hex"))?;
     Ok(Some((nibble >> 2) as u8))
 }
 
@@ -692,10 +698,8 @@ const MMC_SEND_EXT_CSD: u32 = 8;
 
 #[cfg(target_os = "linux")]
 const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
-    ((dir << IOC_DIRSHIFT)
-        | (ty << IOC_TYPESHIFT)
-        | (nr << IOC_NRSHIFT)
-        | (size << IOC_SIZESHIFT)) as libc::c_ulong
+    ((dir << IOC_DIRSHIFT) | (ty << IOC_TYPESHIFT) | (nr << IOC_NRSHIFT) | (size << IOC_SIZESHIFT))
+        as libc::c_ulong
 }
 
 #[cfg(target_os = "linux")]
@@ -723,8 +727,7 @@ struct MmcIocCmd {
 }
 
 #[cfg(target_os = "linux")]
-const MMC_IOC_CMD: libc::c_ulong =
-    iowr(MMC_BLOCK_MAJOR, 0, size_of::<MmcIocCmd>() as u32);
+const MMC_IOC_CMD: libc::c_ulong = iowr(MMC_BLOCK_MAJOR, 0, size_of::<MmcIocCmd>() as u32);
 
 #[cfg(test)]
 mod tests {
@@ -766,7 +769,10 @@ mod tests {
         assert_eq!(snapshot.device_type, Some(0x57));
         assert_eq!(snapshot.sec_count, Some(0x0010_0000));
         assert_eq!(snapshot.bkops_status, Some(2));
-        assert_eq!(snapshot.bkops_urgency.as_deref(), Some("performance impacted"));
+        assert_eq!(
+            snapshot.bkops_urgency.as_deref(),
+            Some("performance impacted")
+        );
         assert_eq!(snapshot.device_life_time_est_typ_a.as_deref(), Some("0x03"));
         assert_eq!(snapshot.device_life_time_est_typ_b.as_deref(), Some("0x04"));
         assert_eq!(snapshot.pre_eol_info.as_deref(), Some("0x01"));

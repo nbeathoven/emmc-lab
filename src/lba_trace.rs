@@ -8,10 +8,10 @@ use std::path::PathBuf;
 use crate::filemap::collect_file_map;
 #[cfg(target_os = "linux")]
 use crate::system::command_exists;
-#[cfg(target_os = "linux")]
-use anyhow::{bail, Context};
 #[cfg(not(target_os = "linux"))]
 use anyhow::anyhow;
+#[cfg(target_os = "linux")]
+use anyhow::{bail, Context};
 #[cfg(target_os = "linux")]
 use std::path::Path;
 #[cfg(target_os = "linux")]
@@ -251,8 +251,8 @@ pub fn build_lba_owner_index(files: &[PathBuf]) -> Result<Vec<LbaOwnerRange>> {
         for file in files {
             let report = collect_file_map(file, None)?;
             for extent in report.extents {
-                let start_lba =
-                    extent.physical_offset / report.sector_size + report.partition_start_lba.unwrap_or(0);
+                let start_lba = extent.physical_offset / report.sector_size
+                    + report.partition_start_lba.unwrap_or(0);
                 let sector_count = extent.length / report.sector_size.max(1);
                 if sector_count == 0 {
                     continue;

@@ -75,6 +75,10 @@ enum Commands {
         #[arg(long)]
         html: Option<PathBuf>,
     },
+    Geometry {
+        #[arg(long)]
+        device: PathBuf,
+    },
     Diag {
         #[command(subcommand)]
         command: DiagCommand,
@@ -175,6 +179,7 @@ pub fn run() -> Result<()> {
             trace_report.as_deref(),
             html.as_deref(),
         ),
+        Some(Commands::Geometry { device }) => app::run_geometry(&device),
         Some(Commands::Diag { command }) => match command {
             DiagCommand::Monitor {
                 duration,

@@ -1,4 +1,5 @@
 use crate::diagnostics::DiagnosticReport;
+use crate::geometry::BlockGeometry;
 use crate::health::HealthReport;
 use crate::storage::SessionRecord;
 use crate::system::{AppPaths, CapabilityReport, DeviceInfo, DoctorReport, SystemSnapshot};
@@ -1344,6 +1345,24 @@ pub(crate) fn render_live_monitor(
             fmt_bytes(report.process_excess_storage_write_bytes),
         ),
     ];
+    let block_rate_rows = report
+        .block_stats_timeline
+        .iter()
+        .take(6)
+        .map(|delta| {
+            vec![
+                format!("/dev/{}", delta.device),
+                format!("{:.1}/{:.1}", delta.read_iops, delta.write_iops),
+                format!(
+                    "{}/{}",
+                    fmt_bytes_f64(delta.read_throughput_bytes_per_sec),
+                    fmt_bytes_f64(delta.write_throughput_bytes_per_sec)
+                ),
+                format!("{:.1}%", delta.utilization_percent),
+                format!("{:.2}", delta.avg_queue_depth),
+            ]
+        })
+        .collect::<Vec<_>>();
     out.push_str(&ui.pair(
         |ui| {
             ui.operator_context(
@@ -1437,6 +1456,9 @@ pub(crate) fn render_live_monitor(
 
     if compact {
         out.push_str(&process_panel);
+        if !block_rate_rows.is_empty() {
+            out.push_str(&ui.table("Block Rates", &block_rate_columns(), &block_rate_rows, None));
+        }
         if report.restricted_process_count > 0 || report.kernel_process_count > 0 {
             out.push_str(&ui.note(
                 "Access:",
@@ -1698,6 +1720,9 @@ pub(crate) fn render_live_monitor(
             },
         ));
     }
+    if !block_rate_rows.is_empty() {
+        out.push_str(&ui.table("Block Rates", &block_rate_columns(), &block_rate_rows, None));
+    }
     if !restricted_panel.is_empty() {
         out.push_str(&restricted_panel);
     }
@@ -1908,6 +1933,18 @@ pub(crate) fn render_doctor_report(report: &DoctorReport) -> String {
     if !device_rows.is_empty() {
         out.push_str(&ui.table("Primary Devices", &device_columns(), &device_rows, None));
     }
+    let geometry_rows = visible_devices
+        .iter()
+        .filter_map(device_geometry_row)
+        .collect::<Vec<_>>();
+    if !geometry_rows.is_empty() {
+        out.push_str(&ui.table(
+            "Geometry Highlights",
+            &geometry_columns(),
+            &geometry_rows,
+            None,
+        ));
+    }
     if hidden_count > 0 {
         out.push_str(&ui.note(
             "Devices:",
@@ -1990,6 +2027,101 @@ pub(crate) fn render_device_list(devices: &[DeviceInfo]) -> String {
     ));
     let rows = devices.iter().map(device_row).collect::<Vec<_>>();
     out.push_str(&ui.table("Visible Devices", &device_columns(), &rows, None));
+    let geometry_rows = devices
+        .iter()
+        .filter_map(device_geometry_row)
+        .collect::<Vec<_>>();
+    if !geometry_rows.is_empty() {
+        out.push_str(&ui.table(
+            "Geometry Highlights",
+            &geometry_columns(),
+            &geometry_rows,
+            None,
+        ));
+    }
+    out
+}
+
+pub(crate) fn render_device_geometry(geometry: &BlockGeometry) -> String {
+    let ui = Ui::detect();
+    let mut out = ui.banner("EMMC-LAB GEOMETRY");
+    out.push_str(&ui.pair(
+        |ui| {
+            ui.operator_context(
+                "Geometry",
+                "selected block device",
+                "read-only",
+                "not used on this screen",
+            )
+        },
+        |ui| {
+            ui.details_panel(
+                "Details",
+                "Geometry shows queue sizing, discard support, alignment, and scheduler details for the selected block device.",
+            )
+        },
+    ));
+    let rows = vec![
+        ("Device".to_string(), geometry.device.display().to_string()),
+        (
+            "Logical block size".to_string(),
+            format_bytes_exact(geometry.logical_block_size),
+        ),
+        (
+            "Physical block size".to_string(),
+            format_bytes_exact(geometry.physical_block_size),
+        ),
+        (
+            "Minimum I/O size".to_string(),
+            format_bytes_exact(geometry.minimum_io_size),
+        ),
+        (
+            "Optimal I/O size".to_string(),
+            format_bytes_exact(geometry.optimal_io_size),
+        ),
+        (
+            "Discard granularity".to_string(),
+            format_bytes_exact(geometry.discard_granularity),
+        ),
+        (
+            "Discard max".to_string(),
+            format_bytes_exact(geometry.discard_max_bytes),
+        ),
+        (
+            "Discard zeroes data".to_string(),
+            geometry
+                .discard_zeroes_data
+                .map(bool_label)
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
+            "Partition start LBA".to_string(),
+            geometry
+                .partition_start_lba
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
+            "Alignment offset".to_string(),
+            format_bytes_exact(geometry.alignment_offset),
+        ),
+        ("Read-only".to_string(), bool_label(geometry.read_only)),
+        ("Removable".to_string(), bool_label(geometry.removable)),
+        (
+            "Write cache".to_string(),
+            opt_text(geometry.write_cache.as_deref()),
+        ),
+        (
+            "Scheduler".to_string(),
+            opt_text(geometry.scheduler.as_deref()),
+        ),
+        (
+            "Size sectors".to_string(),
+            format_grouped_u64(geometry.size_sectors),
+        ),
+        ("Size bytes".to_string(), fmt_bytes(geometry.size_bytes)),
+    ];
+    out.push_str(&ui.kv_table("Block Geometry", &rows, None));
     out
 }
 
@@ -2102,6 +2234,82 @@ fn device_columns<'a>() -> [Column<'a>; 7] {
     ]
 }
 
+fn geometry_columns<'a>() -> [Column<'a>; 6] {
+    [
+        Column {
+            header: "Device",
+            min: 10,
+            max: 14,
+            align: Align::Left,
+        },
+        Column {
+            header: "LBS",
+            min: 7,
+            max: 11,
+            align: Align::Right,
+        },
+        Column {
+            header: "PBS",
+            min: 7,
+            max: 11,
+            align: Align::Right,
+        },
+        Column {
+            header: "Min/Opt I/O",
+            min: 14,
+            max: 18,
+            align: Align::Left,
+        },
+        Column {
+            header: "Discard",
+            min: 10,
+            max: 18,
+            align: Align::Left,
+        },
+        Column {
+            header: "Cache/Sched",
+            min: 14,
+            max: 24,
+            align: Align::Left,
+        },
+    ]
+}
+
+fn block_rate_columns<'a>() -> [Column<'a>; 5] {
+    [
+        Column {
+            header: "Device",
+            min: 10,
+            max: 14,
+            align: Align::Left,
+        },
+        Column {
+            header: "R/W IOPS",
+            min: 10,
+            max: 14,
+            align: Align::Right,
+        },
+        Column {
+            header: "R/W BW",
+            min: 16,
+            max: 22,
+            align: Align::Right,
+        },
+        Column {
+            header: "Util",
+            min: 6,
+            max: 7,
+            align: Align::Right,
+        },
+        Column {
+            header: "QD",
+            min: 4,
+            max: 5,
+            align: Align::Right,
+        },
+    ]
+}
+
 fn device_row(device: &DeviceInfo) -> Vec<String> {
     vec![
         device.path.display().to_string(),
@@ -2115,6 +2323,30 @@ fn device_row(device: &DeviceInfo) -> Vec<String> {
         bool_label(device.is_root_device),
         mount_summary(device),
     ]
+}
+
+fn device_geometry_row(device: &DeviceInfo) -> Option<Vec<String>> {
+    let geometry = device.geometry.as_ref()?;
+    Some(vec![
+        device.path.display().to_string(),
+        format_bytes_exact(geometry.logical_block_size),
+        format_bytes_exact(geometry.physical_block_size),
+        format!(
+            "{}/{}",
+            format_bytes_exact(geometry.minimum_io_size),
+            format_bytes_exact(geometry.optimal_io_size)
+        ),
+        format!(
+            "{}/{}",
+            format_bytes_exact(geometry.discard_granularity),
+            format_bytes_exact(geometry.discard_max_bytes)
+        ),
+        format!(
+            "{}/{}",
+            geometry.write_cache.as_deref().unwrap_or("-"),
+            geometry.scheduler.as_deref().unwrap_or("-")
+        ),
+    ])
 }
 
 fn mount_summary(device: &DeviceInfo) -> String {
@@ -2144,6 +2376,25 @@ fn mount_summary(device: &DeviceInfo) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn format_bytes_exact(value: u64) -> String {
+    if value == 0 {
+        return "0 B".to_string();
+    }
+    fmt_bytes(value)
+}
+
+fn format_grouped_u64(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 fn primary_devices(devices: &[DeviceInfo]) -> Vec<DeviceInfo> {
