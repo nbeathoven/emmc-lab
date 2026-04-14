@@ -1111,6 +1111,34 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
         |ui| ui.kv_table("System", &system_rows, Some(ui.width)),
         |ui| ui.kv_table("eMMC Health", &emmc_rows, Some(ui.width)),
     ));
+    let health_meaning_rows = health_meaning_rows(report);
+    if !health_meaning_rows.is_empty() {
+        out.push_str(&ui.table(
+            "Health Meaning",
+            &[
+                Column {
+                    header: "Field",
+                    min: 14,
+                    max: 28,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Raw",
+                    min: 8,
+                    max: 16,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Meaning",
+                    min: 22,
+                    max: 64,
+                    align: Align::Left,
+                },
+            ],
+            &health_meaning_rows,
+            None,
+        ));
+    }
     out.push_str(&ui.note("Note:", &report.emmc.note));
     if let Some(cid) = &report.emmc.cid {
         out.push_str(&ui.note(
@@ -1131,10 +1159,9 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect::<Vec<_>>()
                 .join(", "),
-            crate::health::VendorSpecificInfo::Unknown { raw_bytes } => format!(
-                "{} raw vendor bytes",
-                raw_bytes.len()
-            ),
+            crate::health::VendorSpecificInfo::Unknown { raw_bytes } => {
+                format!("{} raw vendor bytes", raw_bytes.len())
+            }
         };
         out.push_str(&ui.note("Vendor:", &detail));
     }
@@ -1146,6 +1173,109 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
     }
     out.push_str(&ui.kv_table("Capabilities", &capability_rows(&report.capabilities), None));
     out
+}
+
+fn health_meaning_rows(report: &HealthReport) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    if let Some(raw) = report.emmc.device_life_time_est_typ_a.as_deref() {
+        rows.push(vec![
+            "DEVICE_LIFE_TIME_EST_TYP_A".to_string(),
+            raw.to_string(),
+            decode_life_time_bucket(raw),
+        ]);
+    }
+    if let Some(raw) = report.emmc.device_life_time_est_typ_b.as_deref() {
+        rows.push(vec![
+            "DEVICE_LIFE_TIME_EST_TYP_B".to_string(),
+            raw.to_string(),
+            decode_life_time_bucket(raw),
+        ]);
+    }
+    if let Some(raw) = report.emmc.pre_eol_info.as_deref() {
+        rows.push(vec![
+            "PRE_EOL_INFO".to_string(),
+            raw.to_string(),
+            decode_pre_eol(raw),
+        ]);
+    }
+    if let Some(status) = report.emmc.bkops_status {
+        rows.push(vec![
+            "BKOPS_STATUS".to_string(),
+            format!("0x{status:02x}"),
+            decode_bkops_status(status, report.emmc.bkops_urgency.as_deref()),
+        ]);
+    }
+    if let Some(cid) = &report.emmc.cid {
+        rows.push(vec![
+            "Manufactured".to_string(),
+            cid.mdt.clone(),
+            "device manufacturing date from CID".to_string(),
+        ]);
+        rows.push(vec![
+            "Product".to_string(),
+            cid.pnm.clone(),
+            "device product name from CID".to_string(),
+        ]);
+    }
+    rows
+}
+
+fn decode_life_time_bucket(raw: &str) -> String {
+    let Some(value) = parse_hex_or_decimal_u8(raw) else {
+        return "lifetime bucket unknown".to_string();
+    };
+    match value {
+        0x00 => "not defined by device".to_string(),
+        0x01 => "0% to 10% of rated life used".to_string(),
+        0x02 => "10% to 20% of rated life used".to_string(),
+        0x03 => "20% to 30% of rated life used".to_string(),
+        0x04 => "30% to 40% of rated life used".to_string(),
+        0x05 => "40% to 50% of rated life used".to_string(),
+        0x06 => "50% to 60% of rated life used".to_string(),
+        0x07 => "60% to 70% of rated life used".to_string(),
+        0x08 => "70% to 80% of rated life used".to_string(),
+        0x09 => "80% to 90% of rated life used".to_string(),
+        0x0A => "90% to 100% of rated life used".to_string(),
+        0x0B => "exceeded normal rated life".to_string(),
+        _ => format!("vendor-defined bucket 0x{value:02x}"),
+    }
+}
+
+fn decode_pre_eol(raw: &str) -> String {
+    let Some(value) = parse_hex_or_decimal_u8(raw) else {
+        return "pre-EOL state unknown".to_string();
+    };
+    match value {
+        0x00 => "not defined by device".to_string(),
+        0x01 => "normal; reserved block usage is still below warning level".to_string(),
+        0x02 => "warning; reserved block usage is approaching end-of-life".to_string(),
+        0x03 => "urgent; reserved block usage is near end-of-life".to_string(),
+        _ => format!("vendor-defined pre-EOL state 0x{value:02x}"),
+    }
+}
+
+fn decode_bkops_status(status: u8, fallback: Option<&str>) -> String {
+    match status {
+        0x00 => "no background operations needed".to_string(),
+        0x01 => "background operations outstanding but low urgency".to_string(),
+        0x02 => "background operations may affect performance".to_string(),
+        0x03 => "high background-operation urgency".to_string(),
+        other => fallback
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("device-specific status 0x{other:02x}")),
+    }
+}
+
+fn parse_hex_or_decimal_u8(raw: &str) -> Option<u8> {
+    let trimmed = raw.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u8::from_str_radix(hex, 16).ok()
+    } else {
+        trimmed.parse::<u8>().ok()
+    }
 }
 
 pub(crate) fn render_live_monitor(
@@ -2448,8 +2578,8 @@ fn detect_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        abbreviate_for_display, resolve_color_enabled, set_color_policy,
-        shrink_widths_to_budget, truncate_text, visible_width, Align, ColorPolicy, Column, Ui,
+        abbreviate_for_display, resolve_color_enabled, set_color_policy, shrink_widths_to_budget,
+        truncate_text, visible_width, Align, ColorPolicy, Column, Ui,
     };
 
     #[test]
