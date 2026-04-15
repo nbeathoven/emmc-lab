@@ -45,6 +45,10 @@ pub struct EmmcHealthSnapshot {
     pub pages_per_block: Option<u64>,
     pub vendor_info: Option<VendorSpecificInfo>,
     pub cid: Option<CidInfo>,
+    pub csd: Option<CsdInfo>,
+    pub ext_csd_decoded: Option<ExtCsdDecoded>,
+    pub partition_info: Option<MmcPartitionInfo>,
+    pub health_summary: Vec<(String, String)>,
     pub ext_csd_source: Option<String>,
     pub ext_csd_raw: Option<Vec<u8>>,
 }
@@ -59,6 +63,8 @@ pub struct HealthReport {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadDisturbInput {
     pub total_bytes_read: u64,
+    pub total_bytes_written: u64,
+    pub total_bytes_discarded: u64,
     pub page_size_kb: u64,
     pub pages_per_block: u64,
     pub read_disturb_threshold: u64,
@@ -74,6 +80,36 @@ pub struct ReadDisturbModel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReadDisturbRisk {
+    Low,
+    Moderate,
+    Elevated,
+    High,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnduranceModel {
+    pub device_capacity_bytes: u64,
+    pub erase_block_size_bytes: u64,
+    pub page_size_bytes: u64,
+    pub pages_per_block: u64,
+    pub total_bytes_written: u64,
+    pub total_bytes_read: u64,
+    pub total_bytes_discarded: u64,
+    pub total_blocks: u64,
+    pub host_write_amplification_estimate: f64,
+    pub estimated_program_erase_cycles: f64,
+    pub reads_per_block_estimate: f64,
+    pub read_disturb_risk: ReadDisturbRisk,
+    pub read_disturb_reads_per_block: f64,
+    pub read_disturb_threshold: u64,
+    pub read_disturb_ratio: f64,
+    pub caveats: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct CidInfo {
     pub mid: u8,
     pub oid: String,
@@ -81,7 +117,126 @@ pub struct CidInfo {
     pub prv: String,
     pub psn: String,
     pub mdt: String,
+    pub cbx: Option<u8>,
+    pub prv_major: Option<u8>,
+    pub prv_minor: Option<u8>,
+    pub psn_numeric: Option<u32>,
+    pub mdt_year: Option<u16>,
+    pub mdt_month: Option<u8>,
+    pub crc: Option<u8>,
     pub raw_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CsdInfo {
+    pub csd_structure: u8,
+    pub spec_vers: u8,
+    pub taac: u8,
+    pub nsac: u8,
+    pub tran_speed: u8,
+    pub ccc: u16,
+    pub read_bl_len: u8,
+    pub read_bl_partial: bool,
+    pub write_blk_misalign: bool,
+    pub read_blk_misalign: bool,
+    pub dsr_imp: bool,
+    pub c_size: u32,
+    pub vdd_r_curr_min: u8,
+    pub vdd_r_curr_max: u8,
+    pub vdd_w_curr_min: u8,
+    pub vdd_w_curr_max: u8,
+    pub c_size_mult: u8,
+    pub erase_grp_size: u8,
+    pub erase_grp_mult: u8,
+    pub wp_grp_size: u8,
+    pub wp_grp_enable: bool,
+    pub r2w_factor: u8,
+    pub write_bl_len: u8,
+    pub write_bl_partial: bool,
+    pub content_prot_app: bool,
+    pub file_format_grp: bool,
+    pub copy: bool,
+    pub perm_write_protect: bool,
+    pub tmp_write_protect: bool,
+    pub file_format: u8,
+    pub raw_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ExtCsdDecoded {
+    pub ext_csd_rev: u8,
+    pub device_life_time_est_typ_a: u8,
+    pub device_life_time_est_typ_b: u8,
+    pub pre_eol_info: u8,
+    pub sec_count: u32,
+    pub firmware_version: String,
+    pub boot_size_mult: u8,
+    pub boot_info: u8,
+    pub partition_config: u8,
+    pub boot_bus_conditions: u8,
+    pub rst_n_function: u8,
+    pub rpmb_size_mult: u8,
+    pub partitioning_support: u8,
+    pub max_enh_size_mult: u32,
+    pub partitions_attribute: u8,
+    pub partition_setting_completed: u8,
+    pub gp_size_mult: [[u8; 3]; 4],
+    pub cache_size: u32,
+    pub cache_ctrl: u8,
+    pub cache_flushed: bool,
+    pub bkops_en: u8,
+    pub bkops_start: u8,
+    pub bkops_support: u8,
+    pub bkops_status: u8,
+    pub hpi_features: u8,
+    pub hpi_mgmt: u8,
+    pub erase_group_def: u8,
+    pub hc_erase_grp_size: u8,
+    pub hc_wp_grp_size: u8,
+    pub rel_wr_sec_c: u8,
+    pub wr_rel_set: u8,
+    pub wr_rel_param: u8,
+    pub device_type: u8,
+    pub hs_timing: u8,
+    pub bus_width: u8,
+    pub strobe_support: u8,
+    pub power_class: u8,
+    pub power_off_notification: u8,
+    pub power_off_long_time: u8,
+    pub sleep_notification_time: u8,
+    pub cmdq_support: u8,
+    pub cmdq_depth: u8,
+    pub secure_removal_type: u8,
+    pub secure_feature_support: u8,
+    pub sec_trim_mult: u8,
+    pub sec_erase_mult: u8,
+    pub ffu_features: u8,
+    pub supported_modes: u8,
+    pub ffu_arg: u32,
+    pub number_of_fw_sectors_correctly_programmed: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct GpPartitionInfo {
+    pub index: usize,
+    pub size_mult: [u8; 3],
+    pub raw_size_units: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct MmcPartitionInfo {
+    pub boot_partition_1_size_kb: u64,
+    pub boot_partition_2_size_kb: u64,
+    pub rpmb_size_kb: u64,
+    pub boot_partition_enabled: bool,
+    pub boot_ack_enabled: bool,
+    pub access_partition: u8,
+    pub gp_partitions: Vec<GpPartitionInfo>,
+    pub enhanced_area_size_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +287,7 @@ pub fn read_emmc_health(
             snapshot.ext_csd_raw = Some(raw.to_vec());
             snapshot.raw_text = Some(format_raw_extcsd_dump(&raw));
             snapshot.csd_structure = read_csd_structure_sysfs(&canonical_device).ok().flatten();
+            snapshot.csd = read_csd_sysfs(&canonical_device).ok();
             if let Ok(cid) = read_cid_sysfs(&canonical_device) {
                 snapshot.vendor_info = Some(parse_vendor_specific(&raw, &cid));
                 snapshot.cid = Some(cid);
@@ -147,13 +303,12 @@ pub fn read_emmc_health(
         }
         Err(raw_err) => {
             let raw_err_text = format!("{raw_err:#}");
+            let raw_err_reason = classify_ext_csd_failure(&raw_err_text);
             if !command_exists("mmc") {
                 return Ok(unavailable_health_snapshot(
                     now,
                     &canonical_device,
-                    &format!(
-                        "health telemetry unavailable: raw EXT_CSD read failed ({raw_err_text}); mmc-utils not found"
-                    ),
+                    &format!("health telemetry unavailable: {raw_err_reason}; mmc-utils not found"),
                 ));
             }
             let output = Command::new("mmc")
@@ -174,7 +329,7 @@ pub fn read_emmc_health(
                     page_size_kb,
                     pages_per_block,
                     note: format!(
-                        "health telemetry unavailable: raw EXT_CSD read failed ({raw_err_text}); mmc-utils fallback failed"
+                        "health telemetry unavailable: {raw_err_reason}; mmc-utils fallback failed"
                     ),
                     ..EmmcHealthSnapshot::default()
                 });
@@ -199,11 +354,12 @@ pub fn read_emmc_health(
                 pages_per_block,
                 ext_csd_source: Some("mmc-utils".to_string()),
                 note: format!(
-                    "health values are best-effort values reported by mmc-utils after raw EXT_CSD read failed ({raw_err_text})"
+                    "health values are best-effort values reported by mmc-utils after {raw_err_reason}"
                 ),
                 ..EmmcHealthSnapshot::default()
             };
             snapshot.csd_structure = read_csd_structure_sysfs(&canonical_device).ok().flatten();
+            snapshot.csd = read_csd_sysfs(&canonical_device).ok();
             if let Ok(cid) = read_cid_sysfs(&canonical_device) {
                 snapshot.cid = Some(cid);
             }
@@ -227,6 +383,19 @@ fn parse_extcsd_field(text: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn classify_ext_csd_failure(detail: &str) -> String {
+    let lower = detail.to_ascii_lowercase();
+    if lower.contains("permission denied") || lower.contains("operation not permitted") {
+        "EXT_CSD access was denied by permissions".to_string()
+    } else if lower.contains("timed out") || lower.contains("connection timed out") {
+        "EXT_CSD command timed out at the MMC/kernel layer; this is not a sudo issue".to_string()
+    } else if lower.contains("not supported") || lower.contains("inappropriate ioctl") {
+        "EXT_CSD access is not supported by this kernel/device path".to_string()
+    } else {
+        format!("raw EXT_CSD read failed ({detail})")
+    }
 }
 
 fn unavailable_health_snapshot(
@@ -274,41 +443,35 @@ fn parse_ext_csd(
     page_size_kb: Option<u64>,
     pages_per_block: Option<u64>,
 ) -> EmmcHealthSnapshot {
-    let firmware_bytes = &raw[254..262];
-    let firmware_version = parse_ascii_trimmed(raw, 254, 8);
-    let firmware_version = if firmware_version.is_empty() {
-        Some(
-            firmware_bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<Vec<_>>()
-                .join(""),
-        )
-    } else {
-        Some(firmware_version)
-    };
-    let sec_count = parse_le_u32(raw, 212);
-    let cache_size_kb = parse_le_u32(raw, 249) as u64;
-    let bkops_status = raw[246];
+    let decoded = decode_ext_csd(raw);
+    let sec_count = decoded.sec_count as u64;
+    let cache_size_kb = decoded.cache_size as u64;
+    let bkops_status = decoded.bkops_status;
+    let partition_info = derive_mmc_partition_info(&decoded, raw);
+    let health_summary = build_health_summary(&decoded);
 
     EmmcHealthSnapshot {
         available: true,
-        device_life_time_est_typ_a: Some(format!("0x{:02x}", raw[268])),
-        device_life_time_est_typ_b: Some(format!("0x{:02x}", raw[269])),
-        pre_eol_info: Some(format!("0x{:02x}", raw[267])),
-        ext_csd_rev: Some(raw[192]),
+        device_life_time_est_typ_a: Some(format!("0x{:02x}", decoded.device_life_time_est_typ_a)),
+        device_life_time_est_typ_b: Some(format!("0x{:02x}", decoded.device_life_time_est_typ_b)),
+        pre_eol_info: Some(format!("0x{:02x}", decoded.pre_eol_info)),
+        ext_csd_rev: Some(decoded.ext_csd_rev),
         sec_count: (sec_count != 0).then_some(sec_count as u64),
-        bkops_support: Some(raw[502] != 0),
+        bkops_support: Some(decoded.bkops_support != 0),
         bkops_status: Some(bkops_status),
         bkops_urgency: Some(bkops_urgency_label(bkops_status).to_string()),
         cache_size_kb: Some(cache_size_kb),
-        cache_ctrl: Some(raw[33]),
+        cache_ctrl: Some(decoded.cache_ctrl),
         erase_group_size_bytes: compute_erase_block_size_bytes(raw),
-        hc_erase_grp_size: (raw[224] != 0).then_some(raw[224] as u64),
-        firmware_version,
-        device_type: Some(raw[196]),
+        hc_erase_grp_size: (decoded.hc_erase_grp_size != 0)
+            .then_some(decoded.hc_erase_grp_size as u64),
+        firmware_version: Some(decoded.firmware_version.clone()),
+        device_type: Some(decoded.device_type),
         page_size_kb,
         pages_per_block,
+        ext_csd_decoded: Some(decoded),
+        partition_info: Some(partition_info),
+        health_summary,
         ..EmmcHealthSnapshot::default()
     }
 }
@@ -336,6 +499,168 @@ fn parse_ascii_trimmed(raw: &[u8; 512], start: usize, len: usize) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+fn parse_le_u24(raw: &[u8; 512], offset: usize) -> u32 {
+    u32::from_le_bytes([raw[offset], raw[offset + 1], raw[offset + 2], 0])
+}
+
+pub fn decode_life_time_estimate(value: u8) -> String {
+    match value {
+        0x00 => "Not defined".to_string(),
+        0x01..=0x0A => format!("{}%–{}% life used", (value - 1) * 10, value * 10),
+        0x0B => "Exceeded maximum estimated life".to_string(),
+        _ => format!("Reserved (0x{value:02X})"),
+    }
+}
+
+pub fn decode_pre_eol_info(value: u8) -> &'static str {
+    match value {
+        0x00 => "Not defined",
+        0x01 => "Normal",
+        0x02 => "Warning (consumed 80% of reserved blocks)",
+        0x03 => "Urgent (consumed 90% of reserved blocks)",
+        _ => "Reserved",
+    }
+}
+
+pub fn decode_ext_csd(raw: &[u8; 512]) -> ExtCsdDecoded {
+    let firmware_version = parse_ascii_trimmed(raw, 254, 8);
+    ExtCsdDecoded {
+        ext_csd_rev: raw[192],
+        device_life_time_est_typ_a: raw[268],
+        device_life_time_est_typ_b: raw[269],
+        pre_eol_info: raw[267],
+        sec_count: parse_le_u32(raw, 212),
+        firmware_version: if firmware_version.is_empty() {
+            raw[254..262]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join("")
+        } else {
+            firmware_version
+        },
+        boot_size_mult: raw[226],
+        boot_info: raw[228],
+        partition_config: raw[179],
+        boot_bus_conditions: raw[177],
+        rst_n_function: raw[162],
+        rpmb_size_mult: raw[168],
+        partitioning_support: raw[160],
+        max_enh_size_mult: parse_le_u24(raw, 157),
+        partitions_attribute: raw[156],
+        partition_setting_completed: raw[155],
+        gp_size_mult: [
+            [raw[143], raw[144], raw[145]],
+            [raw[146], raw[147], raw[148]],
+            [raw[149], raw[150], raw[151]],
+            [raw[152], raw[153], raw[154]],
+        ],
+        cache_size: parse_le_u32(raw, 249),
+        cache_ctrl: raw[33],
+        cache_flushed: raw[32] != 0,
+        bkops_en: raw[163],
+        bkops_start: raw[164],
+        bkops_support: raw[502],
+        bkops_status: raw[246],
+        hpi_features: raw[503],
+        hpi_mgmt: raw[161],
+        erase_group_def: raw[175],
+        hc_erase_grp_size: raw[224],
+        hc_wp_grp_size: raw[221],
+        rel_wr_sec_c: raw[222],
+        wr_rel_set: raw[167],
+        wr_rel_param: raw[166],
+        device_type: raw[196],
+        hs_timing: raw[185],
+        bus_width: raw[183],
+        strobe_support: raw[184],
+        power_class: raw[187],
+        power_off_notification: raw[34],
+        power_off_long_time: raw[247],
+        sleep_notification_time: raw[216],
+        cmdq_support: raw[308],
+        cmdq_depth: raw[307],
+        secure_removal_type: raw[16],
+        secure_feature_support: raw[231],
+        sec_trim_mult: raw[229],
+        sec_erase_mult: raw[230],
+        ffu_features: raw[492],
+        supported_modes: raw[493],
+        ffu_arg: parse_le_u32(raw, 487),
+        number_of_fw_sectors_correctly_programmed: parse_le_u32(raw, 302),
+    }
+}
+
+fn derive_mmc_partition_info(decoded: &ExtCsdDecoded, raw: &[u8; 512]) -> MmcPartitionInfo {
+    let gp_partitions = decoded
+        .gp_size_mult
+        .iter()
+        .enumerate()
+        .map(|(index, bytes)| GpPartitionInfo {
+            index: index + 1,
+            size_mult: *bytes,
+            raw_size_units: u32::from_le_bytes([bytes[0], bytes[1], bytes[2], 0]),
+        })
+        .filter(|part| part.raw_size_units != 0)
+        .collect::<Vec<_>>();
+    let enhanced_units = decoded.max_enh_size_mult as u64;
+    MmcPartitionInfo {
+        boot_partition_1_size_kb: decoded.boot_size_mult as u64 * 128,
+        boot_partition_2_size_kb: decoded.boot_size_mult as u64 * 128,
+        rpmb_size_kb: decoded.rpmb_size_mult as u64 * 128,
+        boot_partition_enabled: (decoded.partition_config & 0x38) != 0,
+        boot_ack_enabled: (decoded.partition_config & 0x40) != 0,
+        access_partition: decoded.partition_config & 0x7,
+        gp_partitions,
+        enhanced_area_size_bytes: if enhanced_units == 0 {
+            None
+        } else {
+            Some(
+                enhanced_units
+                    .saturating_mul(raw[224].max(1) as u64)
+                    .saturating_mul(512 * 1024),
+            )
+        },
+    }
+}
+
+fn build_health_summary(decoded: &ExtCsdDecoded) -> Vec<(String, String)> {
+    vec![
+        (
+            "Life A".to_string(),
+            decode_life_time_estimate(decoded.device_life_time_est_typ_a),
+        ),
+        (
+            "Life B".to_string(),
+            decode_life_time_estimate(decoded.device_life_time_est_typ_b),
+        ),
+        (
+            "Pre-EOL".to_string(),
+            decode_pre_eol_info(decoded.pre_eol_info).to_string(),
+        ),
+        (
+            "Boot partitions".to_string(),
+            format!("{} KiB each", decoded.boot_size_mult as u64 * 128),
+        ),
+        (
+            "RPMB".to_string(),
+            format!("{} KiB", decoded.rpmb_size_mult as u64 * 128),
+        ),
+        (
+            "Cache".to_string(),
+            format!("{} KiB / ctrl {}", decoded.cache_size, decoded.cache_ctrl),
+        ),
+        (
+            "Command queue".to_string(),
+            if decoded.cmdq_support != 0 {
+                format!("supported, depth {}", decoded.cmdq_depth)
+            } else {
+                "not supported".to_string()
+            },
+        ),
+    ]
 }
 
 fn bkops_urgency_label(status: u8) -> &'static str {
@@ -397,6 +722,68 @@ pub fn build_read_disturb_model(input: ReadDisturbInput) -> ReadDisturbModel {
     }
 }
 
+pub fn build_endurance_model(input: ReadDisturbInput) -> EnduranceModel {
+    let page_size_bytes = input.page_size_kb.saturating_mul(1024);
+    let erase_block_size_bytes = page_size_bytes.saturating_mul(input.pages_per_block);
+    let total_blocks = if erase_block_size_bytes == 0 {
+        0
+    } else {
+        input.device_capacity_bytes / erase_block_size_bytes.max(1)
+    };
+    let estimated_program_erase_cycles = if input.device_capacity_bytes == 0 {
+        0.0
+    } else {
+        input.total_bytes_written as f64 / input.device_capacity_bytes as f64
+    };
+    let reads_per_block_estimate = if total_blocks == 0 {
+        0.0
+    } else {
+        input.total_bytes_read as f64 / total_blocks as f64
+    };
+    let read_disturb_ratio = if input.read_disturb_threshold == 0 {
+        0.0
+    } else {
+        reads_per_block_estimate / input.read_disturb_threshold as f64
+    };
+    let read_disturb_risk = if input.read_disturb_threshold == 0 || total_blocks == 0 {
+        ReadDisturbRisk::Unknown
+    } else if read_disturb_ratio < 0.3 {
+        ReadDisturbRisk::Low
+    } else if read_disturb_ratio < 0.7 {
+        ReadDisturbRisk::Moderate
+    } else if read_disturb_ratio < 1.0 {
+        ReadDisturbRisk::Elevated
+    } else {
+        ReadDisturbRisk::High
+    };
+    EnduranceModel {
+        device_capacity_bytes: input.device_capacity_bytes,
+        erase_block_size_bytes,
+        page_size_bytes,
+        pages_per_block: input.pages_per_block,
+        total_bytes_written: input.total_bytes_written,
+        total_bytes_read: input.total_bytes_read,
+        total_bytes_discarded: input.total_bytes_discarded,
+        total_blocks,
+        host_write_amplification_estimate: 1.0,
+        estimated_program_erase_cycles,
+        reads_per_block_estimate,
+        read_disturb_risk,
+        read_disturb_reads_per_block: reads_per_block_estimate,
+        read_disturb_threshold: input.read_disturb_threshold,
+        read_disturb_ratio,
+        caveats: vec![
+            "All estimates are based on host-visible logical I/O, not physical NAND operations"
+                .to_string(),
+            "FTL wear-leveling, garbage collection, and write amplification are not visible"
+                .to_string(),
+            "Actual NAND wear may be 2-10x higher than host-visible writes suggest".to_string(),
+            "Read-disturb thresholds vary by NAND technology (SLC/MLC/TLC) and are not readable"
+                .to_string(),
+        ],
+    }
+}
+
 /// Compute the high-capacity erase group size in bytes from EXT_CSD.
 pub fn compute_erase_block_size_bytes(raw: &[u8; 512]) -> Option<u64> {
     let groups = raw[224] as u64;
@@ -412,17 +799,37 @@ fn read_cid_sysfs(device: &Path) -> Result<CidInfo> {
     let sys_dir = block_device_sys_dir(device);
     let raw_hex = read_trimmed(sys_dir.join("device/cid"))
         .ok_or_else(|| anyhow!("missing CID sysfs entry for {}", device.display()))?;
+    let raw_bytes = parse_hex_register(&raw_hex)?;
     let mid = read_trimmed(sys_dir.join("device/manfid"))
         .and_then(|value| parse_sysfs_hex_u64(&value))
         .map(|value| value as u8)
         .ok_or_else(|| anyhow!("missing or invalid manfid sysfs entry"))?;
+    let prv = raw_bytes[6];
+    let mdt_raw = ((raw_bytes[13] as u16) << 8) | raw_bytes[14] as u16;
+    let mdt_month = (mdt_raw & 0x0F) as u8;
+    let mdt_year = 1997 + ((mdt_raw >> 4) & 0xFF);
     Ok(CidInfo {
         mid,
         oid: read_trimmed(sys_dir.join("device/oemid")).unwrap_or_else(|| "-".to_string()),
         pnm: read_trimmed(sys_dir.join("device/name")).unwrap_or_else(|| "-".to_string()),
-        prv: read_trimmed(sys_dir.join("device/fwrev")).unwrap_or_else(|| "-".to_string()),
-        psn: read_trimmed(sys_dir.join("device/serial")).unwrap_or_else(|| "-".to_string()),
-        mdt: read_trimmed(sys_dir.join("device/date")).unwrap_or_else(|| "-".to_string()),
+        prv: format!("{}.{}", prv >> 4, prv & 0x0F),
+        psn: format!(
+            "0x{:08x}",
+            u32::from_be_bytes([raw_bytes[7], raw_bytes[8], raw_bytes[9], raw_bytes[10]])
+        ),
+        mdt: format!("{mdt_month:02}/{mdt_year}"),
+        cbx: Some((raw_bytes[1] >> 6) & 0x03),
+        prv_major: Some(prv >> 4),
+        prv_minor: Some(prv & 0x0F),
+        psn_numeric: Some(u32::from_be_bytes([
+            raw_bytes[7],
+            raw_bytes[8],
+            raw_bytes[9],
+            raw_bytes[10],
+        ])),
+        mdt_year: Some(mdt_year),
+        mdt_month: Some(mdt_month),
+        crc: Some(raw_bytes[15] >> 1),
         raw_hex,
     })
 }
@@ -466,6 +873,79 @@ fn parse_vendor_specific(raw: &[u8; 512], cid: &CidInfo) -> VendorSpecificInfo {
             raw_bytes: vendor_bytes.to_vec(),
         },
     }
+}
+
+#[cfg(target_os = "linux")]
+fn read_csd_sysfs(device: &Path) -> Result<CsdInfo> {
+    let sys_dir = block_device_sys_dir(device);
+    let raw_hex = read_trimmed(sys_dir.join("device/csd"))
+        .ok_or_else(|| anyhow!("missing CSD sysfs entry for {}", device.display()))?;
+    let raw = parse_hex_register(&raw_hex)?;
+    let bits = |msb: usize, lsb: usize| extract_bits_be(&raw, msb, lsb);
+    Ok(CsdInfo {
+        csd_structure: bits(127, 126) as u8,
+        spec_vers: bits(125, 122) as u8,
+        taac: bits(119, 112) as u8,
+        nsac: bits(111, 104) as u8,
+        tran_speed: bits(103, 96) as u8,
+        ccc: bits(95, 84) as u16,
+        read_bl_len: bits(83, 80) as u8,
+        read_bl_partial: bits(79, 79) != 0,
+        write_blk_misalign: bits(78, 78) != 0,
+        read_blk_misalign: bits(77, 77) != 0,
+        dsr_imp: bits(76, 76) != 0,
+        c_size: bits(73, 62) as u32,
+        vdd_r_curr_min: bits(61, 59) as u8,
+        vdd_r_curr_max: bits(58, 56) as u8,
+        vdd_w_curr_min: bits(55, 53) as u8,
+        vdd_w_curr_max: bits(52, 50) as u8,
+        c_size_mult: bits(49, 47) as u8,
+        erase_grp_size: bits(46, 42) as u8,
+        erase_grp_mult: bits(41, 37) as u8,
+        wp_grp_size: bits(36, 32) as u8,
+        wp_grp_enable: bits(31, 31) != 0,
+        r2w_factor: bits(28, 26) as u8,
+        write_bl_len: bits(25, 22) as u8,
+        write_bl_partial: bits(21, 21) != 0,
+        content_prot_app: bits(16, 16) != 0,
+        file_format_grp: bits(15, 15) != 0,
+        copy: bits(14, 14) != 0,
+        perm_write_protect: bits(13, 13) != 0,
+        tmp_write_protect: bits(12, 12) != 0,
+        file_format: bits(11, 10) as u8,
+        raw_hex,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_csd_sysfs(_device: &Path) -> Result<CsdInfo> {
+    Err(anyhow!("not supported on this platform"))
+}
+
+#[cfg(target_os = "linux")]
+fn parse_hex_register(value: &str) -> Result<[u8; 16]> {
+    let trimmed = value.trim();
+    if trimmed.len() != 32 {
+        return Err(anyhow!("expected 32 hex chars, got {}", trimmed.len()));
+    }
+    let mut raw = [0_u8; 16];
+    for (index, chunk) in trimmed.as_bytes().chunks(2).enumerate() {
+        let text = std::str::from_utf8(chunk).context("invalid register hex")?;
+        raw[index] = u8::from_str_radix(text, 16).context("invalid register hex byte")?;
+    }
+    Ok(raw)
+}
+
+#[cfg(target_os = "linux")]
+fn extract_bits_be(raw: &[u8; 16], msb: usize, lsb: usize) -> u64 {
+    let mut value = 0_u64;
+    for bit in (lsb..=msb).rev() {
+        let byte_index = 15 - (bit / 8);
+        let bit_index = bit % 8;
+        let bit_value = (raw[byte_index] >> bit_index) & 1;
+        value = (value << 1) | bit_value as u64;
+    }
+    value
 }
 
 /// Render a 16-byte-per-row EXT_CSD hex dump with lightweight field labels.
@@ -808,6 +1288,7 @@ mod tests {
             psn: "0x0".to_string(),
             mdt: "01/2026".to_string(),
             raw_hex: "00".to_string(),
+            ..CidInfo::default()
         };
         match parse_vendor_specific(&raw, &samsung_cid) {
             VendorSpecificInfo::Samsung { health_data } => assert!(!health_data.is_empty()),
@@ -828,6 +1309,8 @@ mod tests {
     fn read_disturb_model_scales_and_labels_risk() {
         let model = build_read_disturb_model(ReadDisturbInput {
             total_bytes_read: 2_000_000,
+            total_bytes_written: 1_000_000,
+            total_bytes_discarded: 0,
             page_size_kb: 16,
             pages_per_block: 256,
             read_disturb_threshold: 2,
@@ -843,6 +1326,8 @@ mod tests {
     fn read_disturb_model_handles_zero_inputs() {
         let model = build_read_disturb_model(ReadDisturbInput {
             total_bytes_read: 0,
+            total_bytes_written: 0,
+            total_bytes_discarded: 0,
             page_size_kb: 0,
             pages_per_block: 256,
             read_disturb_threshold: 100_000,

@@ -49,11 +49,17 @@ enum Commands {
     },
     FileMap {
         #[arg()]
-        file: PathBuf,
+        file: Option<PathBuf>,
+        #[arg(long)]
+        dir: Option<PathBuf>,
         #[arg(long)]
         device: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         csv: bool,
+        #[arg(long, default_value_t = false)]
+        summary: bool,
+        #[arg(long, default_value_t = false)]
+        erase_align: bool,
     },
     LbaTrace {
         #[arg(long)]
@@ -74,6 +80,20 @@ enum Commands {
         trace_report: Option<PathBuf>,
         #[arg(long)]
         html: Option<PathBuf>,
+    },
+    Discard {
+        #[arg(long)]
+        device: PathBuf,
+        #[arg(long, default_value_t = false)]
+        probe: bool,
+        #[arg(long, default_value_t = false)]
+        test: bool,
+        #[arg(long)]
+        offset: Option<u64>,
+        #[arg(long)]
+        length: Option<u64>,
+        #[arg(long = "i-understand-this-will-discard-data", default_value_t = false)]
+        i_understand_this_will_discard_data: bool,
     },
     Geometry {
         #[arg(long)]
@@ -158,9 +178,21 @@ pub fn run() -> Result<()> {
             pages_per_block,
             read_disturb_threshold,
         ),
-        Some(Commands::FileMap { file, device, csv }) => {
-            app::run_file_map(&file, device.as_deref(), csv)
-        }
+        Some(Commands::FileMap {
+            file,
+            dir,
+            device,
+            csv,
+            summary,
+            erase_align,
+        }) => app::run_file_map(
+            file.as_deref(),
+            dir.as_deref(),
+            device.as_deref(),
+            csv,
+            summary,
+            erase_align,
+        ),
         Some(Commands::LbaTrace {
             device,
             duration,
@@ -178,6 +210,21 @@ pub fn run() -> Result<()> {
             &fa_report,
             trace_report.as_deref(),
             html.as_deref(),
+        ),
+        Some(Commands::Discard {
+            device,
+            probe,
+            test,
+            offset,
+            length,
+            i_understand_this_will_discard_data,
+        }) => app::run_discard(
+            &device,
+            probe,
+            test,
+            offset,
+            length,
+            i_understand_this_will_discard_data,
         ),
         Some(Commands::Geometry { device }) => app::run_geometry(&device),
         Some(Commands::Diag { command }) => match command {

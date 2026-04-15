@@ -1,6 +1,6 @@
 use crate::diagnostics::DiagnosticReport;
 use crate::geometry::BlockGeometry;
-use crate::health::HealthReport;
+use crate::health::{decode_life_time_estimate, decode_pre_eol_info, ExtCsdDecoded, HealthReport};
 use crate::storage::SessionRecord;
 use crate::system::{AppPaths, CapabilityReport, DeviceInfo, DoctorReport, SystemSnapshot};
 use std::cmp::min;
@@ -1140,6 +1140,23 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
             None,
         ));
     }
+    if let Some(decoded) = &report.emmc.ext_csd_decoded {
+        out.push_str(&ui.kv_table(
+            "MMC Features",
+            &ext_csd_feature_rows(decoded),
+            Some(ui.width),
+        ));
+    }
+    if let Some(partitions) = &report.emmc.partition_info {
+        out.push_str(&ui.kv_table(
+            "MMC Partitions",
+            &partition_info_rows(partitions),
+            Some(ui.width),
+        ));
+    }
+    if let Some(csd) = &report.emmc.csd {
+        out.push_str(&ui.kv_table("CSD", &csd_rows(csd), Some(ui.width)));
+    }
     out.push_str(&ui.note("Note:", &report.emmc.note));
     if let Some(cid) = &report.emmc.cid {
         out.push_str(&ui.note(
@@ -1166,6 +1183,9 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
         };
         out.push_str(&ui.note("Vendor:", &detail));
     }
+    if !report.emmc.health_summary.is_empty() {
+        out.push_str(&ui.kv_table("Health Summary", &report.emmc.health_summary, None));
+    }
     if let Some(raw) = &report.emmc.raw_text {
         out.push_str(&ui.note(
             "Raw EXT_CSD:",
@@ -1182,21 +1202,27 @@ fn health_meaning_rows(report: &HealthReport) -> Vec<Vec<String>> {
         rows.push(vec![
             "DEVICE_LIFE_TIME_EST_TYP_A".to_string(),
             raw.to_string(),
-            decode_life_time_bucket(raw),
+            parse_hex_or_decimal_u8(raw)
+                .map(decode_life_time_estimate)
+                .unwrap_or_else(|| "lifetime bucket unknown".to_string()),
         ]);
     }
     if let Some(raw) = report.emmc.device_life_time_est_typ_b.as_deref() {
         rows.push(vec![
             "DEVICE_LIFE_TIME_EST_TYP_B".to_string(),
             raw.to_string(),
-            decode_life_time_bucket(raw),
+            parse_hex_or_decimal_u8(raw)
+                .map(decode_life_time_estimate)
+                .unwrap_or_else(|| "lifetime bucket unknown".to_string()),
         ]);
     }
     if let Some(raw) = report.emmc.pre_eol_info.as_deref() {
         rows.push(vec![
             "PRE_EOL_INFO".to_string(),
             raw.to_string(),
-            decode_pre_eol(raw),
+            parse_hex_or_decimal_u8(raw)
+                .map(|value| decode_pre_eol_info(value).to_string())
+                .unwrap_or_else(|| "pre-EOL state unknown".to_string()),
         ]);
     }
     if let Some(status) = report.emmc.bkops_status {
@@ -1221,40 +1247,6 @@ fn health_meaning_rows(report: &HealthReport) -> Vec<Vec<String>> {
     rows
 }
 
-fn decode_life_time_bucket(raw: &str) -> String {
-    let Some(value) = parse_hex_or_decimal_u8(raw) else {
-        return "lifetime bucket unknown".to_string();
-    };
-    match value {
-        0x00 => "not defined by device".to_string(),
-        0x01 => "0% to 10% of rated life used".to_string(),
-        0x02 => "10% to 20% of rated life used".to_string(),
-        0x03 => "20% to 30% of rated life used".to_string(),
-        0x04 => "30% to 40% of rated life used".to_string(),
-        0x05 => "40% to 50% of rated life used".to_string(),
-        0x06 => "50% to 60% of rated life used".to_string(),
-        0x07 => "60% to 70% of rated life used".to_string(),
-        0x08 => "70% to 80% of rated life used".to_string(),
-        0x09 => "80% to 90% of rated life used".to_string(),
-        0x0A => "90% to 100% of rated life used".to_string(),
-        0x0B => "exceeded normal rated life".to_string(),
-        _ => format!("vendor-defined bucket 0x{value:02x}"),
-    }
-}
-
-fn decode_pre_eol(raw: &str) -> String {
-    let Some(value) = parse_hex_or_decimal_u8(raw) else {
-        return "pre-EOL state unknown".to_string();
-    };
-    match value {
-        0x00 => "not defined by device".to_string(),
-        0x01 => "normal; reserved block usage is still below warning level".to_string(),
-        0x02 => "warning; reserved block usage is approaching end-of-life".to_string(),
-        0x03 => "urgent; reserved block usage is near end-of-life".to_string(),
-        _ => format!("vendor-defined pre-EOL state 0x{value:02x}"),
-    }
-}
-
 fn decode_bkops_status(status: u8, fallback: Option<&str>) -> String {
     match status {
         0x00 => "no background operations needed".to_string(),
@@ -1265,6 +1257,120 @@ fn decode_bkops_status(status: u8, fallback: Option<&str>) -> String {
             .map(str::to_string)
             .unwrap_or_else(|| format!("device-specific status 0x{other:02x}")),
     }
+}
+
+fn ext_csd_feature_rows(decoded: &ExtCsdDecoded) -> Vec<(String, String)> {
+    vec![
+        ("FW".to_string(), decoded.firmware_version.clone()),
+        (
+            "Boot size".to_string(),
+            format!("{} KiB", decoded.boot_size_mult as u64 * 128),
+        ),
+        (
+            "RPMB size".to_string(),
+            format!("{} KiB", decoded.rpmb_size_mult as u64 * 128),
+        ),
+        (
+            "Partition config".to_string(),
+            format!("0x{:02x}", decoded.partition_config),
+        ),
+        (
+            "Reset function".to_string(),
+            format!("0x{:02x}", decoded.rst_n_function),
+        ),
+        (
+            "Bus width".to_string(),
+            format!("0x{:02x}", decoded.bus_width),
+        ),
+        (
+            "HS timing".to_string(),
+            format!("0x{:02x}", decoded.hs_timing),
+        ),
+        (
+            "CMDQ".to_string(),
+            if decoded.cmdq_support != 0 {
+                format!("supported, depth {}", decoded.cmdq_depth)
+            } else {
+                "not supported".to_string()
+            },
+        ),
+        (
+            "Reliable write".to_string(),
+            format!(
+                "rel_wr_sec_c={} wr_rel_set=0x{:02x} wr_rel_param=0x{:02x}",
+                decoded.rel_wr_sec_c, decoded.wr_rel_set, decoded.wr_rel_param
+            ),
+        ),
+        (
+            "Secure ops".to_string(),
+            format!(
+                "support=0x{:02x} trim_mult={} erase_mult={}",
+                decoded.secure_feature_support, decoded.sec_trim_mult, decoded.sec_erase_mult
+            ),
+        ),
+    ]
+}
+
+fn partition_info_rows(info: &crate::health::MmcPartitionInfo) -> Vec<(String, String)> {
+    let mut rows = vec![
+        (
+            "Boot partition 1".to_string(),
+            format!("{} KiB", info.boot_partition_1_size_kb),
+        ),
+        (
+            "Boot partition 2".to_string(),
+            format!("{} KiB", info.boot_partition_2_size_kb),
+        ),
+        ("RPMB".to_string(), format!("{} KiB", info.rpmb_size_kb)),
+        (
+            "Boot enabled".to_string(),
+            bool_label(info.boot_partition_enabled),
+        ),
+        ("Boot ACK".to_string(), bool_label(info.boot_ack_enabled)),
+        (
+            "Access partition".to_string(),
+            info.access_partition.to_string(),
+        ),
+    ];
+    if !info.gp_partitions.is_empty() {
+        rows.push((
+            "General purpose".to_string(),
+            info.gp_partitions
+                .iter()
+                .map(|part| format!("GP{} mult={:?}", part.index, part.size_mult))
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+    }
+    if let Some(bytes) = info.enhanced_area_size_bytes {
+        rows.push(("Enhanced area".to_string(), fmt_bytes(bytes)));
+    }
+    rows
+}
+
+fn csd_rows(csd: &crate::health::CsdInfo) -> Vec<(String, String)> {
+    vec![
+        ("CSD structure".to_string(), csd.csd_structure.to_string()),
+        ("Spec vers".to_string(), csd.spec_vers.to_string()),
+        (
+            "Tran speed".to_string(),
+            format!("0x{:02x}", csd.tran_speed),
+        ),
+        ("CCC".to_string(), format!("0x{:03x}", csd.ccc)),
+        ("Read block len".to_string(), csd.read_bl_len.to_string()),
+        ("Write block len".to_string(), csd.write_bl_len.to_string()),
+        ("Erase group".to_string(), csd.erase_grp_size.to_string()),
+        ("WP group".to_string(), csd.wp_grp_size.to_string()),
+        (
+            "Write protect".to_string(),
+            format!(
+                "perm={} temp={} enabled={}",
+                bool_label(csd.perm_write_protect),
+                bool_label(csd.tmp_write_protect),
+                bool_label(csd.wp_grp_enable)
+            ),
+        ),
+    ]
 }
 
 fn parse_hex_or_decimal_u8(raw: &str) -> Option<u8> {
