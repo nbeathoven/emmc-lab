@@ -62,8 +62,8 @@ pub fn collect_file_map(file: &Path, device_override: Option<&Path>) -> Result<F
 
 #[cfg(target_os = "linux")]
 fn collect_file_map_linux(file: &Path, device_override: Option<&Path>) -> Result<FilemapReport> {
-    let metadata = fs::symlink_metadata(file)
-        .with_context(|| format!("failed to stat {}", file.display()))?;
+    let metadata =
+        fs::symlink_metadata(file).with_context(|| format!("failed to stat {}", file.display()))?;
     if metadata.file_type().is_symlink() {
         bail!("refusing to FIEMAP a symlink: {}", file.display());
     }
@@ -174,7 +174,10 @@ fn fibmap_extents(file: &std::fs::File) -> Result<Vec<FilemapExtent>> {
     }
 
     let block_size = block_size as u64;
-    let file_len = file.metadata().context("failed to read file metadata")?.len();
+    let file_len = file
+        .metadata()
+        .context("failed to read file metadata")?
+        .len();
     let block_count = if file_len == 0 {
         0
     } else {
@@ -289,7 +292,9 @@ fn resolve_mount_for_file_from_text(file: &Path, mountinfo: &str) -> Result<Moun
         };
         let better = best
             .as_ref()
-            .map(|current| mountpoint.components().count() > current.mountpoint.components().count())
+            .map(|current| {
+                mountpoint.components().count() > current.mountpoint.components().count()
+            })
             .unwrap_or(true);
         if better {
             best = Some(candidate);
@@ -322,7 +327,10 @@ fn unescape_mount_field(value: &str) -> String {
 /// Read the device logical sector size via BLKSSZGET.
 #[cfg(target_os = "linux")]
 fn block_device_sector_size(device: &Path) -> Result<u64> {
-    if let Some(name) = device.file_name().map(|value| value.to_string_lossy().to_string()) {
+    if let Some(name) = device
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+    {
         for candidate in [Some(name.clone()), parent_block_name(&name)] {
             let Some(candidate) = candidate else {
                 continue;
@@ -339,8 +347,8 @@ fn block_device_sector_size(device: &Path) -> Result<u64> {
             }
         }
     }
-    let file = File::open(device)
-        .with_context(|| format!("failed to open {}", device.display()))?;
+    let file =
+        File::open(device).with_context(|| format!("failed to open {}", device.display()))?;
     let mut size: libc::c_int = 0;
     let rc = unsafe { libc::ioctl(file.as_raw_fd(), libc::BLKSSZGET, &mut size) };
     if rc != 0 {
@@ -364,17 +372,17 @@ fn parent_block_name(name: &str) -> Option<String> {
 /// Read a partition's start sector from sysfs. Returns `None` for whole-disk devices.
 #[cfg(target_os = "linux")]
 fn read_partition_start_lba(device: &Path) -> Result<Option<u64>> {
-    let Some(name) = device.file_name().map(|value| value.to_string_lossy().to_string()) else {
+    let Some(name) = device
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+    else {
         return Ok(None);
     };
     let start_path = PathBuf::from("/sys/class/block").join(&name).join("start");
     match fs::read_to_string(&start_path) {
-        Ok(value) => Ok(Some(
-            value
-                .trim()
-                .parse::<u64>()
-                .with_context(|| format!("invalid LBA start in {}", start_path.display()))?,
-        )),
+        Ok(value) => Ok(Some(value.trim().parse::<u64>().with_context(|| {
+            format!("invalid LBA start in {}", start_path.display())
+        })?)),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err).with_context(|| format!("failed to read {}", start_path.display())),
     }
@@ -382,9 +390,8 @@ fn read_partition_start_lba(device: &Path) -> Result<Option<u64>> {
 
 /// Render the mapping as CSV with one row per extent.
 pub fn filemap_report_to_csv(report: &FilemapReport) -> String {
-    let mut csv = String::from(
-        "logical_offset,physical_lba,length,flags,flag_names,erase_aligned\n",
-    );
+    let mut csv =
+        String::from("logical_offset,physical_lba,length,flags,flag_names,erase_aligned\n");
     for extent in &report.extents {
         let physical_lba = extent.physical_offset / report.sector_size.max(1);
         let erase_aligned = report
@@ -435,10 +442,8 @@ const IOC_DIRSHIFT: u32 = IOC_SIZESHIFT + IOC_SIZEBITS;
 
 #[cfg(target_os = "linux")]
 const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
-    ((dir << IOC_DIRSHIFT)
-        | (ty << IOC_TYPESHIFT)
-        | (nr << IOC_NRSHIFT)
-        | (size << IOC_SIZESHIFT)) as libc::c_ulong
+    ((dir << IOC_DIRSHIFT) | (ty << IOC_TYPESHIFT) | (nr << IOC_NRSHIFT) | (size << IOC_SIZESHIFT))
+        as libc::c_ulong
 }
 
 #[cfg(target_os = "linux")]
@@ -477,9 +482,8 @@ mod tests {
     use super::{
         decode_fiemap_flags, resolve_mount_for_file_from_text, FIEMAP_EXTENT_DATA_ENCRYPTED,
         FIEMAP_EXTENT_DATA_INLINE, FIEMAP_EXTENT_DATA_TAIL, FIEMAP_EXTENT_DELALLOC,
-        FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_MERGED,
-        FIEMAP_EXTENT_NOT_ALIGNED, FIEMAP_EXTENT_SHARED, FIEMAP_EXTENT_UNKNOWN,
-        FIEMAP_EXTENT_UNWRITTEN,
+        FIEMAP_EXTENT_ENCODED, FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_MERGED, FIEMAP_EXTENT_NOT_ALIGNED,
+        FIEMAP_EXTENT_SHARED, FIEMAP_EXTENT_UNKNOWN, FIEMAP_EXTENT_UNWRITTEN,
     };
     use std::path::{Path, PathBuf};
 

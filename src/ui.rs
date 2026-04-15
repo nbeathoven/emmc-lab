@@ -1,4 +1,5 @@
 use crate::diagnostics::DiagnosticReport;
+use crate::geometry::BlockGeometry;
 use crate::health::HealthReport;
 use crate::storage::SessionRecord;
 use crate::system::{AppPaths, CapabilityReport, DeviceInfo, DoctorReport, SystemSnapshot};
@@ -435,22 +436,22 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
 
         let run_table = vec![
             vec![
-                "Completed I/O".to_string(),
+                "Completed ops".to_string(),
                 run.read_ios_completed.to_string(),
                 run.write_ios_completed.to_string(),
             ],
             vec![
-                "Completed bytes".to_string(),
+                "Completed data".to_string(),
                 fmt_bytes(run.read_bytes_completed),
                 fmt_bytes(run.write_bytes_completed),
             ],
             vec![
-                "Failed I/O".to_string(),
+                "Failed ops".to_string(),
                 run.failed_reads.to_string(),
                 run.failed_writes.to_string(),
             ],
             vec![
-                "Partial I/O".to_string(),
+                "Partial ops".to_string(),
                 run.partial_reads.to_string(),
                 run.partial_writes.to_string(),
             ],
@@ -1111,6 +1112,34 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
         |ui| ui.kv_table("System", &system_rows, Some(ui.width)),
         |ui| ui.kv_table("eMMC Health", &emmc_rows, Some(ui.width)),
     ));
+    let health_meaning_rows = health_meaning_rows(report);
+    if !health_meaning_rows.is_empty() {
+        out.push_str(&ui.table(
+            "Health Meaning",
+            &[
+                Column {
+                    header: "Field",
+                    min: 14,
+                    max: 28,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Raw",
+                    min: 8,
+                    max: 16,
+                    align: Align::Left,
+                },
+                Column {
+                    header: "Meaning",
+                    min: 22,
+                    max: 64,
+                    align: Align::Left,
+                },
+            ],
+            &health_meaning_rows,
+            None,
+        ));
+    }
     out.push_str(&ui.note("Note:", &report.emmc.note));
     if let Some(cid) = &report.emmc.cid {
         out.push_str(&ui.note(
@@ -1131,10 +1160,9 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
                 .map(|(key, value)| format!("{key}={value}"))
                 .collect::<Vec<_>>()
                 .join(", "),
-            crate::health::VendorSpecificInfo::Unknown { raw_bytes } => format!(
-                "{} raw vendor bytes",
-                raw_bytes.len()
-            ),
+            crate::health::VendorSpecificInfo::Unknown { raw_bytes } => {
+                format!("{} raw vendor bytes", raw_bytes.len())
+            }
         };
         out.push_str(&ui.note("Vendor:", &detail));
     }
@@ -1146,6 +1174,109 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
     }
     out.push_str(&ui.kv_table("Capabilities", &capability_rows(&report.capabilities), None));
     out
+}
+
+fn health_meaning_rows(report: &HealthReport) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    if let Some(raw) = report.emmc.device_life_time_est_typ_a.as_deref() {
+        rows.push(vec![
+            "DEVICE_LIFE_TIME_EST_TYP_A".to_string(),
+            raw.to_string(),
+            decode_life_time_bucket(raw),
+        ]);
+    }
+    if let Some(raw) = report.emmc.device_life_time_est_typ_b.as_deref() {
+        rows.push(vec![
+            "DEVICE_LIFE_TIME_EST_TYP_B".to_string(),
+            raw.to_string(),
+            decode_life_time_bucket(raw),
+        ]);
+    }
+    if let Some(raw) = report.emmc.pre_eol_info.as_deref() {
+        rows.push(vec![
+            "PRE_EOL_INFO".to_string(),
+            raw.to_string(),
+            decode_pre_eol(raw),
+        ]);
+    }
+    if let Some(status) = report.emmc.bkops_status {
+        rows.push(vec![
+            "BKOPS_STATUS".to_string(),
+            format!("0x{status:02x}"),
+            decode_bkops_status(status, report.emmc.bkops_urgency.as_deref()),
+        ]);
+    }
+    if let Some(cid) = &report.emmc.cid {
+        rows.push(vec![
+            "Manufactured".to_string(),
+            cid.mdt.clone(),
+            "device manufacturing date from CID".to_string(),
+        ]);
+        rows.push(vec![
+            "Product".to_string(),
+            cid.pnm.clone(),
+            "device product name from CID".to_string(),
+        ]);
+    }
+    rows
+}
+
+fn decode_life_time_bucket(raw: &str) -> String {
+    let Some(value) = parse_hex_or_decimal_u8(raw) else {
+        return "lifetime bucket unknown".to_string();
+    };
+    match value {
+        0x00 => "not defined by device".to_string(),
+        0x01 => "0% to 10% of rated life used".to_string(),
+        0x02 => "10% to 20% of rated life used".to_string(),
+        0x03 => "20% to 30% of rated life used".to_string(),
+        0x04 => "30% to 40% of rated life used".to_string(),
+        0x05 => "40% to 50% of rated life used".to_string(),
+        0x06 => "50% to 60% of rated life used".to_string(),
+        0x07 => "60% to 70% of rated life used".to_string(),
+        0x08 => "70% to 80% of rated life used".to_string(),
+        0x09 => "80% to 90% of rated life used".to_string(),
+        0x0A => "90% to 100% of rated life used".to_string(),
+        0x0B => "exceeded normal rated life".to_string(),
+        _ => format!("vendor-defined bucket 0x{value:02x}"),
+    }
+}
+
+fn decode_pre_eol(raw: &str) -> String {
+    let Some(value) = parse_hex_or_decimal_u8(raw) else {
+        return "pre-EOL state unknown".to_string();
+    };
+    match value {
+        0x00 => "not defined by device".to_string(),
+        0x01 => "normal; reserved block usage is still below warning level".to_string(),
+        0x02 => "warning; reserved block usage is approaching end-of-life".to_string(),
+        0x03 => "urgent; reserved block usage is near end-of-life".to_string(),
+        _ => format!("vendor-defined pre-EOL state 0x{value:02x}"),
+    }
+}
+
+fn decode_bkops_status(status: u8, fallback: Option<&str>) -> String {
+    match status {
+        0x00 => "no background operations needed".to_string(),
+        0x01 => "background operations outstanding but low urgency".to_string(),
+        0x02 => "background operations may affect performance".to_string(),
+        0x03 => "high background-operation urgency".to_string(),
+        other => fallback
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("device-specific status 0x{other:02x}")),
+    }
+}
+
+fn parse_hex_or_decimal_u8(raw: &str) -> Option<u8> {
+    let trimmed = raw.trim();
+    if let Some(hex) = trimmed
+        .strip_prefix("0x")
+        .or_else(|| trimmed.strip_prefix("0X"))
+    {
+        u8::from_str_radix(hex, 16).ok()
+    } else {
+        trimmed.parse::<u8>().ok()
+    }
 }
 
 pub(crate) fn render_live_monitor(
@@ -1214,6 +1345,24 @@ pub(crate) fn render_live_monitor(
             fmt_bytes(report.process_excess_storage_write_bytes),
         ),
     ];
+    let block_rate_rows = report
+        .block_stats_timeline
+        .iter()
+        .take(6)
+        .map(|delta| {
+            vec![
+                format!("/dev/{}", delta.device),
+                format!("{:.1}/{:.1}", delta.read_iops, delta.write_iops),
+                format!(
+                    "{}/{}",
+                    fmt_bytes_f64(delta.read_throughput_bytes_per_sec),
+                    fmt_bytes_f64(delta.write_throughput_bytes_per_sec)
+                ),
+                format!("{:.1}%", delta.utilization_percent),
+                format!("{:.2}", delta.avg_queue_depth),
+            ]
+        })
+        .collect::<Vec<_>>();
     out.push_str(&ui.pair(
         |ui| {
             ui.operator_context(
@@ -1307,6 +1456,9 @@ pub(crate) fn render_live_monitor(
 
     if compact {
         out.push_str(&process_panel);
+        if !block_rate_rows.is_empty() {
+            out.push_str(&ui.table("Block Rates", &block_rate_columns(), &block_rate_rows, None));
+        }
         if report.restricted_process_count > 0 || report.kernel_process_count > 0 {
             out.push_str(&ui.note(
                 "Access:",
@@ -1568,6 +1720,9 @@ pub(crate) fn render_live_monitor(
             },
         ));
     }
+    if !block_rate_rows.is_empty() {
+        out.push_str(&ui.table("Block Rates", &block_rate_columns(), &block_rate_rows, None));
+    }
     if !restricted_panel.is_empty() {
         out.push_str(&restricted_panel);
     }
@@ -1778,6 +1933,18 @@ pub(crate) fn render_doctor_report(report: &DoctorReport) -> String {
     if !device_rows.is_empty() {
         out.push_str(&ui.table("Primary Devices", &device_columns(), &device_rows, None));
     }
+    let geometry_rows = visible_devices
+        .iter()
+        .filter_map(device_geometry_row)
+        .collect::<Vec<_>>();
+    if !geometry_rows.is_empty() {
+        out.push_str(&ui.table(
+            "Geometry Highlights",
+            &geometry_columns(),
+            &geometry_rows,
+            None,
+        ));
+    }
     if hidden_count > 0 {
         out.push_str(&ui.note(
             "Devices:",
@@ -1860,6 +2027,101 @@ pub(crate) fn render_device_list(devices: &[DeviceInfo]) -> String {
     ));
     let rows = devices.iter().map(device_row).collect::<Vec<_>>();
     out.push_str(&ui.table("Visible Devices", &device_columns(), &rows, None));
+    let geometry_rows = devices
+        .iter()
+        .filter_map(device_geometry_row)
+        .collect::<Vec<_>>();
+    if !geometry_rows.is_empty() {
+        out.push_str(&ui.table(
+            "Geometry Highlights",
+            &geometry_columns(),
+            &geometry_rows,
+            None,
+        ));
+    }
+    out
+}
+
+pub(crate) fn render_device_geometry(geometry: &BlockGeometry) -> String {
+    let ui = Ui::detect();
+    let mut out = ui.banner("EMMC-LAB GEOMETRY");
+    out.push_str(&ui.pair(
+        |ui| {
+            ui.operator_context(
+                "Geometry",
+                "selected block device",
+                "read-only",
+                "not used on this screen",
+            )
+        },
+        |ui| {
+            ui.details_panel(
+                "Details",
+                "Geometry shows queue sizing, discard support, alignment, and scheduler details for the selected block device.",
+            )
+        },
+    ));
+    let rows = vec![
+        ("Device".to_string(), geometry.device.display().to_string()),
+        (
+            "Logical block size".to_string(),
+            format_bytes_exact(geometry.logical_block_size),
+        ),
+        (
+            "Physical block size".to_string(),
+            format_bytes_exact(geometry.physical_block_size),
+        ),
+        (
+            "Minimum I/O size".to_string(),
+            format_bytes_exact(geometry.minimum_io_size),
+        ),
+        (
+            "Optimal I/O size".to_string(),
+            format_bytes_exact(geometry.optimal_io_size),
+        ),
+        (
+            "Discard granularity".to_string(),
+            format_bytes_exact(geometry.discard_granularity),
+        ),
+        (
+            "Discard max".to_string(),
+            format_bytes_exact(geometry.discard_max_bytes),
+        ),
+        (
+            "Discard zeroes data".to_string(),
+            geometry
+                .discard_zeroes_data
+                .map(bool_label)
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
+            "Partition start LBA".to_string(),
+            geometry
+                .partition_start_lba
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        (
+            "Alignment offset".to_string(),
+            format_bytes_exact(geometry.alignment_offset),
+        ),
+        ("Read-only".to_string(), bool_label(geometry.read_only)),
+        ("Removable".to_string(), bool_label(geometry.removable)),
+        (
+            "Write cache".to_string(),
+            opt_text(geometry.write_cache.as_deref()),
+        ),
+        (
+            "Scheduler".to_string(),
+            opt_text(geometry.scheduler.as_deref()),
+        ),
+        (
+            "Size sectors".to_string(),
+            format_grouped_u64(geometry.size_sectors),
+        ),
+        ("Size bytes".to_string(), fmt_bytes(geometry.size_bytes)),
+    ];
+    out.push_str(&ui.kv_table("Block Geometry", &rows, None));
     out
 }
 
@@ -1972,6 +2234,82 @@ fn device_columns<'a>() -> [Column<'a>; 7] {
     ]
 }
 
+fn geometry_columns<'a>() -> [Column<'a>; 6] {
+    [
+        Column {
+            header: "Device",
+            min: 10,
+            max: 14,
+            align: Align::Left,
+        },
+        Column {
+            header: "LBS",
+            min: 7,
+            max: 11,
+            align: Align::Right,
+        },
+        Column {
+            header: "PBS",
+            min: 7,
+            max: 11,
+            align: Align::Right,
+        },
+        Column {
+            header: "Min/Opt I/O",
+            min: 14,
+            max: 18,
+            align: Align::Left,
+        },
+        Column {
+            header: "Discard",
+            min: 10,
+            max: 18,
+            align: Align::Left,
+        },
+        Column {
+            header: "Cache/Sched",
+            min: 14,
+            max: 24,
+            align: Align::Left,
+        },
+    ]
+}
+
+fn block_rate_columns<'a>() -> [Column<'a>; 5] {
+    [
+        Column {
+            header: "Device",
+            min: 10,
+            max: 14,
+            align: Align::Left,
+        },
+        Column {
+            header: "R/W IOPS",
+            min: 10,
+            max: 14,
+            align: Align::Right,
+        },
+        Column {
+            header: "R/W BW",
+            min: 16,
+            max: 22,
+            align: Align::Right,
+        },
+        Column {
+            header: "Util",
+            min: 6,
+            max: 7,
+            align: Align::Right,
+        },
+        Column {
+            header: "QD",
+            min: 4,
+            max: 5,
+            align: Align::Right,
+        },
+    ]
+}
+
 fn device_row(device: &DeviceInfo) -> Vec<String> {
     vec![
         device.path.display().to_string(),
@@ -1985,6 +2323,30 @@ fn device_row(device: &DeviceInfo) -> Vec<String> {
         bool_label(device.is_root_device),
         mount_summary(device),
     ]
+}
+
+fn device_geometry_row(device: &DeviceInfo) -> Option<Vec<String>> {
+    let geometry = device.geometry.as_ref()?;
+    Some(vec![
+        device.path.display().to_string(),
+        format_bytes_exact(geometry.logical_block_size),
+        format_bytes_exact(geometry.physical_block_size),
+        format!(
+            "{}/{}",
+            format_bytes_exact(geometry.minimum_io_size),
+            format_bytes_exact(geometry.optimal_io_size)
+        ),
+        format!(
+            "{}/{}",
+            format_bytes_exact(geometry.discard_granularity),
+            format_bytes_exact(geometry.discard_max_bytes)
+        ),
+        format!(
+            "{}/{}",
+            geometry.write_cache.as_deref().unwrap_or("-"),
+            geometry.scheduler.as_deref().unwrap_or("-")
+        ),
+    ])
 }
 
 fn mount_summary(device: &DeviceInfo) -> String {
@@ -2014,6 +2376,25 @@ fn mount_summary(device: &DeviceInfo) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn format_bytes_exact(value: u64) -> String {
+    if value == 0 {
+        return "0 B".to_string();
+    }
+    fmt_bytes(value)
+}
+
+fn format_grouped_u64(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }
 
 fn primary_devices(devices: &[DeviceInfo]) -> Vec<DeviceInfo> {
@@ -2448,8 +2829,8 @@ fn detect_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        abbreviate_for_display, resolve_color_enabled, set_color_policy,
-        shrink_widths_to_budget, truncate_text, visible_width, Align, ColorPolicy, Column, Ui,
+        abbreviate_for_display, resolve_color_enabled, set_color_policy, shrink_widths_to_budget,
+        truncate_text, visible_width, Align, ColorPolicy, Column, Ui,
     };
 
     #[test]

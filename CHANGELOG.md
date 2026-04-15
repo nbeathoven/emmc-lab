@@ -2,6 +2,12 @@
 
 All notable changes to `emmc-lab` are documented in this file.
 
+## v0.2.6 - 2026-04-14
+
+- added block geometry collection and rendering for device inventory and doctor output
+- added `geometry --device` for queue sizing, discard, alignment, scheduler, and capacity inspection
+- added richer block-level stats sampling, live monitor block-rate panels, and block-stats CSV export
+
 ## v0.2.5 - 2026-04-14
 
 - added direct EXT_CSD parsing with Linux-gated raw access, richer health fields, vendor decode, raw dumps, and expanded doctor checks

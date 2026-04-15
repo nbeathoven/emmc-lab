@@ -3,6 +3,7 @@ use crate::diagnostics::{
 };
 use crate::engine::execute_profile;
 use crate::filemap;
+use crate::geometry::collect_block_geometry;
 use crate::health::{
     build_read_disturb_model, collect_health, format_raw_extcsd_dump, read_emmc_health,
     ReadDisturbInput,
@@ -24,10 +25,10 @@ use crate::system::{
     diskstats_map, doctor, list_devices, logical_block_size, AppPaths, DeviceInfo,
 };
 use crate::ui::{
-    render_device_list, render_doctor_report, render_health_report, render_live_monitor,
-    render_selector_screen, render_settings, SelectorColumn, SelectorRow,
+    render_device_geometry, render_device_list, render_doctor_report, render_health_report,
+    render_live_monitor, render_selector_screen, render_settings, SelectorColumn, SelectorRow,
 };
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use chrono::{Local, Utc};
 use std::env;
 use std::ffi::CString;
@@ -292,9 +293,11 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
     );
 
     if profile.telemetry.health_telemetry {
-        record.health_before = Some(with_spinner("Collecting pre-run health", || {
-            read_emmc_health(&profile.target.path, None, None)
-        })?);
+        let target_label = operator_target_label(&profile.target.path);
+        record.health_before = Some(with_spinner(
+            &format!("Collecting pre-run health for {target_label}"),
+            || read_emmc_health(&profile.target.path, None, None),
+        )?);
     }
 
     let stop_signal = Arc::new(AtomicBool::new(false));
@@ -309,14 +312,20 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
         None
     };
 
-    let (run_summary, intervals) = with_spinner("Running workload", || execute_profile(&profile))?;
+    let target_label = operator_target_label(&profile.target.path);
+    let (run_summary, intervals) =
+        with_spinner(&format!("Running workload on {target_label}"), || {
+            execute_profile(&profile)
+        })?;
     record.run_summary = Some(run_summary);
     record.interval_stats = intervals;
 
     if profile.telemetry.health_telemetry {
-        record.health_after = Some(with_spinner("Collecting post-run health", || {
-            read_emmc_health(&profile.target.path, None, None)
-        })?);
+        let target_label = operator_target_label(&profile.target.path);
+        record.health_after = Some(with_spinner(
+            &format!("Collecting post-run health for {target_label}"),
+            || read_emmc_health(&profile.target.path, None, None),
+        )?);
     }
 
     if let Some(handle) = diag_handle {
@@ -368,7 +377,8 @@ pub fn run_health(
     pages_per_block: Option<u64>,
     read_disturb_threshold: u64,
 ) -> Result<()> {
-    let report = with_spinner("Collecting health", || {
+    let target_label = operator_target_label(device);
+    let report = with_spinner(&format!("Collecting health for {target_label}"), || {
         collect_health(paths, device, page_size_kb, pages_per_block)
     })?;
     println!("{}", render_health_report(&report));
@@ -469,11 +479,7 @@ pub fn run_file_map(file: &Path, device: Option<&Path>, csv: bool) -> Result<()>
         };
         println!(
             "{:<6} {:>14} {:>14} {:>12}  {}",
-            index,
-            extent.logical_offset,
-            physical_lba,
-            extent.length,
-            flags
+            index, extent.logical_offset, physical_lba, extent.length, flags
         );
     }
     Ok(())
@@ -497,12 +503,12 @@ pub fn run_lba_trace(
     println!("Duration: {}s", report.duration_secs);
     println!("Events: {}", report.event_count);
     for event in &report.events {
-        let summary = if let Some(hit) = lba_trace::match_lba_to_file(event.lba, &report.owner_index)
-        {
-            format!(" -> {} @ {}", hit.file.display(), hit.offset_in_file)
-        } else {
-            String::new()
-        };
+        let summary =
+            if let Some(hit) = lba_trace::match_lba_to_file(event.lba, &report.owner_index) {
+                format!(" -> {} @ {}", hit.file.display(), hit.offset_in_file)
+            } else {
+                String::new()
+            };
         println!(
             "ts={} dir={:?} lba={} sectors={}{}",
             event.timestamp_ns, event.direction, event.lba, event.length_sectors, summary
@@ -528,13 +534,8 @@ pub fn run_health_compare(
         ),
         None => None,
     };
-    let report = health_compare::compare_health(
-        paths,
-        device,
-        fa_report,
-        trace_report.as_ref(),
-        None,
-    )?;
+    let report =
+        health_compare::compare_health(paths, device, fa_report, trace_report.as_ref(), None)?;
     println!(
         "{:<20} {:<12} {:<12} {:<10} Detail",
         "Field", "Local", "FA", "Status"
@@ -546,9 +547,8 @@ pub fn run_health_compare(
         );
     }
     if let Some(html_output) = html_output {
-        fs::write(html_output, render_health_compare_html(&report)).map_err(|err| {
-            anyhow::anyhow!("failed to write {}: {err}", html_output.display())
-        })?;
+        fs::write(html_output, render_health_compare_html(&report))
+            .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", html_output.display()))?;
         println!("HTML report: {}", html_output.display());
     }
     Ok(())
@@ -650,6 +650,13 @@ pub fn run_doctor(paths: &AppPaths) -> Result<()> {
     Ok(())
 }
 
+pub fn run_geometry(device: &Path) -> Result<()> {
+    let geometry = collect_block_geometry(device)?
+        .ok_or_else(|| anyhow!("no geometry data available for {}", device.display()))?;
+    println!("{}", render_device_geometry(&geometry));
+    Ok(())
+}
+
 pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<WizardOutcome>> {
     let mut profile = seed_profile.unwrap_or_else(|| Profile::default_named("new-test"));
     let mut step = 0_i32;
@@ -666,7 +673,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         match step {
             0 => {
                 match prompt_menu_default_help(
-                    "Mode [1=raw, 2=file]",
+                    "Target mode [1=raw device, 2=file target]",
                     target_mode_choice(&profile.target.mode),
                     &["1", "2"],
                     Some(
@@ -734,7 +741,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             2 => {
                 match prompt_menu_default_help(
-                    "Workload [1=randread, 2=randwrite, 3=randrw, 4=read, 5=write]",
+                    "Workload [1=random read, 2=random write, 3=random mixed, 4=sequential read, 5=sequential write]",
                     workload_choice(&profile.workload.test_type),
                     &["1", "2", "3", "4", "5"],
                     Some(
@@ -760,7 +767,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             3 => match prompt_menu_default_help(
                 &format!(
-                    "Range [1=all, 2=sectors, 3=bytes, 4=one sector] [{}]",
+                    "Target range [1=whole target, 2=sector range, 3=byte range, 4=single sector] [{}]",
                     range_hint_label(&hints)
                 ),
                 addressing_choice(&profile.addressing.mode),
@@ -905,7 +912,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             4 => match prompt_menu_default_help(
-                "Stop [1=time, 2=ops]",
+                "Stop rule [1=runtime, 2=exact ops]",
                 stop_choice(profile.workload.exact_op_count.is_some()),
                 &["1", "2"],
                 Some(
@@ -915,7 +922,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Value(value) => match value.as_str() {
                     "1" => {
                         let runtime = match prompt_u64_in_range(
-                            "Runtime seconds",
+                            "Runtime [seconds]",
                             profile.workload.runtime_seconds.unwrap_or(30),
                             5,
                             86_400,
@@ -930,7 +937,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     }
                     "2" => {
                         let op_count = match prompt_u64_in_range(
-                            "Exact operation count",
+                            "Completed ops target [count]",
                             profile.workload.exact_op_count.unwrap_or(1_000_000),
                             1,
                             1_000_000_000,
@@ -953,7 +960,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             5 => match prompt_usize_in_range(
                 &format!(
-                    "Block size bytes [rec {}, {}-1048576, sector {} B]",
+                    "Block size [bytes per I/O, rec {}, {}-1048576, sector {} B]",
                     suggested_block_size(&profile, &hints),
                     block_size_floor(&profile, hints.logical_sector_size),
                     hints.logical_sector_size
@@ -977,7 +984,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             6 => match prompt_u32_in_range(
-                "Queue depth [rec 1-8]",
+                "Queue depth [in-flight ops per worker, rec 1-8]",
                 profile.workload.queue_depth.clamp(1, 8),
                 1,
                 64,
@@ -993,7 +1000,10 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             7 => match prompt_usize_in_range(
-                &format!("Workers [rec 1-{}]", suggested_worker_count()),
+                &format!(
+                    "Workers [parallel threads, rec 1-{}]",
+                    suggested_worker_count()
+                ),
                 profile
                     .workload
                     .worker_count
@@ -1014,7 +1024,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             8 => {
                 match prompt_u64_in_range(
-                    "Random seed",
+                    "Random seed [repeatable pattern]",
                     profile.workload.random_seed,
                     1,
                     u64::MAX,
@@ -1033,7 +1043,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             9 => match prompt_bool_default(
                 &format!(
-                    "Direct I/O [rec {}]",
+                    "Direct I/O [bypass page cache, rec {}]",
                     if profile.target.mode == TargetMode::RawDevice {
                         "y"
                     } else {
@@ -1108,7 +1118,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             12 => match prompt_bool_default(
                 &format!(
-                    "Health [{}]",
+                    "Health capture [before/after run, {}]",
                     if hints.health_supported {
                         "rec y"
                     } else {
@@ -1128,7 +1138,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             13 => match prompt_bool_default(
-                "Diag capture [rec n]",
+                "Diag capture [background sampler, rec n]",
                 profile.diagnostics.capture_during_test,
                 Some(
                     "Run the lightweight I/O sampler while the workload runs so you can spot interference from other processes.",
@@ -1178,7 +1188,12 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         println!("3. Save and run now");
         println!("4. Back");
         println!("5. Cancel");
-        match prompt_menu_default_help("Action [1-5]", "4", &["1", "2", "3", "4", "5"], None)? {
+        match prompt_menu_default_help(
+            "Next step [1=save, 2=run, 3=save+run, 4=back, 5=cancel]",
+            "4",
+            &["1", "2", "3", "4", "5"],
+            None,
+        )? {
             WizardInput::Value(value) if value == "1" => {
                 profile.save(&profile_path)?;
                 println!("Saved profile: {}", profile_path.display());
@@ -1413,6 +1428,10 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
                     .to_string(),
                 ),
                 ("Profile".to_string(), profile.name.clone()),
+                (
+                    "Target".to_string(),
+                    operator_target_label(&profile.target.path),
+                ),
             ],
             &[
                 SelectorColumn {
@@ -1901,13 +1920,51 @@ fn short_target_label(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+fn operator_target_label(path: &Path) -> String {
+    let path_text = path.display().to_string();
+    let Some(device) = list_devices()
+        .ok()
+        .and_then(|devices| devices.into_iter().find(|device| device.path == path))
+    else {
+        return path_text;
+    };
+
+    if device.is_partition {
+        if let Some(mount) = device.mountpoints.first().filter(|value| !value.is_empty()) {
+            return format!("{path_text} [partition {mount}]");
+        }
+        if let Some(parent) = device.parent.as_deref().filter(|value| !value.is_empty()) {
+            return format!("{path_text} [partition of {parent}]");
+        }
+        return format!("{path_text} [partition]");
+    }
+
+    if let Some(model) = device
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return format!("{path_text} [device {model}]");
+    }
+
+    match device.media_type.as_deref() {
+        Some(kind) if !kind.trim().is_empty() => format!("{path_text} [device {kind}]"),
+        _ => format!("{path_text} [device]"),
+    }
+}
+
 fn run_profile_session_interactive(paths: &AppPaths, profile: Profile) -> Result<()> {
     loop {
         let session_id = run_profile_session(paths, profile.clone())?;
         println!("1. Repeat same test");
         println!("2. View this report");
         println!("3. Back");
-        match prompt_menu_default_help("Action [1-3]", "3", &["1", "2", "3"], None)? {
+        match prompt_menu_default_help(
+            "After run [1=repeat, 2=view report, 3=back]",
+            "3",
+            &["1", "2", "3"],
+            None,
+        )? {
             WizardInput::Value(value) if value == "1" => continue,
             WizardInput::Value(value) if value == "2" => {
                 run_report(paths, &session_id)?;
@@ -3440,8 +3497,7 @@ mod tests {
     use super::{
         adjusted_block_size, block_size_floor, device_rank, format_bytes, format_grouped_u64,
         is_auxiliary_device, is_single_sector_target, normalize_block_size,
-        normalize_file_target_path, parse_yes_no,
-        PromptBuffer,
+        normalize_file_target_path, parse_yes_no, PromptBuffer,
     };
     use crate::profile::{AddressingMode, Profile, TargetMode};
     use crate::system::DeviceInfo;

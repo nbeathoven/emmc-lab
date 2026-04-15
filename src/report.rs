@@ -180,6 +180,44 @@ fn export_csv(paths: &AppPaths, record: &SessionRecord) -> Result<Vec<PathBuf>> 
         }
         fs::write(&device_path, device_csv)?;
         paths_out.push(device_path);
+
+        if !diag.block_stats_timeline.is_empty() {
+            let block_stats_path = paths
+                .exports_dir
+                .join(format!("{}_block_stats.csv", record.session_id));
+            let mut block_csv = String::from("device,interval_ms,read_iops,write_iops,discard_iops,flush_rate,read_throughput_bytes_per_sec,write_throughput_bytes_per_sec,read_merge_ratio,write_merge_ratio,avg_read_await_ms,avg_write_await_ms,avg_discard_await_ms,avg_flush_await_ms,avg_queue_depth,utilization_percent\n");
+            for delta in &diag.block_stats_timeline {
+                block_csv.push_str(&format!(
+                    "{},{},{:.3},{:.3},{},{},{:.3},{:.3},{:.6},{:.6},{:.3},{:.3},{},{},{:.3},{:.3}\n",
+                    csv_escape(&delta.device),
+                    delta.interval_ms,
+                    delta.read_iops,
+                    delta.write_iops,
+                    delta.discard_iops
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_default(),
+                    delta.flush_rate
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_default(),
+                    delta.read_throughput_bytes_per_sec,
+                    delta.write_throughput_bytes_per_sec,
+                    delta.read_merge_ratio,
+                    delta.write_merge_ratio,
+                    delta.avg_read_await_ms,
+                    delta.avg_write_await_ms,
+                    delta.avg_discard_await_ms
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_default(),
+                    delta.avg_flush_await_ms
+                        .map(|value| format!("{value:.3}"))
+                        .unwrap_or_default(),
+                    delta.avg_queue_depth,
+                    delta.utilization_percent,
+                ));
+            }
+            fs::write(&block_stats_path, block_csv)?;
+            paths_out.push(block_stats_path);
+        }
     }
 
     Ok(paths_out)

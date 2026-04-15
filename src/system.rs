@@ -1,3 +1,4 @@
+use crate::geometry::{collect_block_geometry, BlockGeometry};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -5,11 +6,11 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::os::fd::RawFd;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
-use std::os::fd::AsRawFd;
 #[cfg(target_os = "linux")]
 use std::process;
 
@@ -80,6 +81,8 @@ pub struct DeviceInfo {
     pub mount_options: Vec<String>,
     pub is_root_device: bool,
     pub logical_block_size: Option<u64>,
+    #[serde(default)]
+    pub geometry: Option<BlockGeometry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,6 +221,38 @@ pub fn doctor(paths: &AppPaths) -> DoctorReport {
             "/proc access unavailable".to_string()
         },
     });
+    let geometry_count = devices
+        .iter()
+        .filter(|device| device.geometry.is_some())
+        .count();
+    checks.push(DoctorCheck {
+        name: "block_geometry".to_string(),
+        ok: geometry_count > 0,
+        detail: if geometry_count > 0 {
+            format!("geometry collected for {geometry_count} visible block devices")
+        } else {
+            "no queue geometry could be read from /sys/class/block".to_string()
+        },
+    });
+    let discard_count = devices
+        .iter()
+        .filter(|device| {
+            device
+                .geometry
+                .as_ref()
+                .map(|geometry| geometry.discard_granularity > 0)
+                .unwrap_or(false)
+        })
+        .count();
+    checks.push(DoctorCheck {
+        name: "discard_support".to_string(),
+        ok: discard_count > 0,
+        detail: if discard_count > 0 {
+            format!("{discard_count} devices advertise discard support")
+        } else {
+            "no visible device advertises discard support".to_string()
+        },
+    });
     checks.push(fiemap_support_check());
     checks.push(partition_start_check(first_mmc));
     checks.push(blktrace_support_check(first_mmc));
@@ -260,6 +295,7 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
             });
         let logical_block_size = read_trimmed(entry.path().join("queue/logical_block_size"))
             .and_then(|s| s.parse::<u64>().ok());
+        let geometry = collect_block_geometry(&dev_path).ok().flatten();
         let major_minor = read_trimmed(entry.path().join("dev")).unwrap_or_default();
         let mut mountpoints = Vec::new();
         let mut filesystem_types = Vec::new();
@@ -289,7 +325,11 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>> {
                 .as_ref()
                 .map(|root| root == &dev_path.display().to_string())
                 .unwrap_or(false),
-            logical_block_size,
+            logical_block_size: geometry
+                .as_ref()
+                .map(|value| value.logical_block_size)
+                .or(logical_block_size),
+            geometry,
         });
     }
     devices.sort_by(|a, b| a.name.cmp(&b.name));
@@ -720,10 +760,8 @@ const IOC_DIRSHIFT: u32 = IOC_SIZESHIFT + IOC_SIZEBITS;
 
 #[cfg(target_os = "linux")]
 const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
-    ((dir << IOC_DIRSHIFT)
-        | (ty << IOC_TYPESHIFT)
-        | (nr << IOC_NRSHIFT)
-        | (size << IOC_SIZESHIFT)) as libc::c_ulong
+    ((dir << IOC_DIRSHIFT) | (ty << IOC_TYPESHIFT) | (nr << IOC_NRSHIFT) | (size << IOC_SIZESHIFT))
+        as libc::c_ulong
 }
 
 #[cfg(target_os = "linux")]
