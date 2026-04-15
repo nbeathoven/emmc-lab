@@ -673,7 +673,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         match step {
             0 => {
                 match prompt_menu_default_help(
-                    "Mode [1=raw, 2=file]",
+                    "Target mode [1=raw device, 2=file target]",
                     target_mode_choice(&profile.target.mode),
                     &["1", "2"],
                     Some(
@@ -741,7 +741,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             2 => {
                 match prompt_menu_default_help(
-                    "Workload [1=randread, 2=randwrite, 3=randrw, 4=read, 5=write]",
+                    "Workload [1=random read, 2=random write, 3=random mixed, 4=sequential read, 5=sequential write]",
                     workload_choice(&profile.workload.test_type),
                     &["1", "2", "3", "4", "5"],
                     Some(
@@ -767,7 +767,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             3 => match prompt_menu_default_help(
                 &format!(
-                    "Range [1=all, 2=sectors, 3=bytes, 4=one sector] [{}]",
+                    "Target range [1=whole target, 2=sector range, 3=byte range, 4=single sector] [{}]",
                     range_hint_label(&hints)
                 ),
                 addressing_choice(&profile.addressing.mode),
@@ -912,7 +912,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             4 => match prompt_menu_default_help(
-                "Stop [1=time, 2=ops]",
+                "Stop rule [1=runtime, 2=exact ops]",
                 stop_choice(profile.workload.exact_op_count.is_some()),
                 &["1", "2"],
                 Some(
@@ -922,7 +922,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Value(value) => match value.as_str() {
                     "1" => {
                         let runtime = match prompt_u64_in_range(
-                            "Runtime seconds",
+                            "Runtime [seconds]",
                             profile.workload.runtime_seconds.unwrap_or(30),
                             5,
                             86_400,
@@ -937,7 +937,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                     }
                     "2" => {
                         let op_count = match prompt_u64_in_range(
-                            "Exact operation count",
+                            "Completed ops target [count]",
                             profile.workload.exact_op_count.unwrap_or(1_000_000),
                             1,
                             1_000_000_000,
@@ -960,7 +960,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             5 => match prompt_usize_in_range(
                 &format!(
-                    "Block size bytes [rec {}, {}-1048576, sector {} B]",
+                    "Block size [bytes per I/O, rec {}, {}-1048576, sector {} B]",
                     suggested_block_size(&profile, &hints),
                     block_size_floor(&profile, hints.logical_sector_size),
                     hints.logical_sector_size
@@ -984,7 +984,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             6 => match prompt_u32_in_range(
-                "Queue depth [rec 1-8]",
+                "Queue depth [in-flight ops per worker, rec 1-8]",
                 profile.workload.queue_depth.clamp(1, 8),
                 1,
                 64,
@@ -1000,7 +1000,10 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             7 => match prompt_usize_in_range(
-                &format!("Workers [rec 1-{}]", suggested_worker_count()),
+                &format!(
+                    "Workers [parallel threads, rec 1-{}]",
+                    suggested_worker_count()
+                ),
                 profile
                     .workload
                     .worker_count
@@ -1021,7 +1024,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             },
             8 => {
                 match prompt_u64_in_range(
-                    "Random seed",
+                    "Random seed [repeatable pattern]",
                     profile.workload.random_seed,
                     1,
                     u64::MAX,
@@ -1040,7 +1043,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             9 => match prompt_bool_default(
                 &format!(
-                    "Direct I/O [rec {}]",
+                    "Direct I/O [bypass page cache, rec {}]",
                     if profile.target.mode == TargetMode::RawDevice {
                         "y"
                     } else {
@@ -1115,7 +1118,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
             }
             12 => match prompt_bool_default(
                 &format!(
-                    "Health [{}]",
+                    "Health capture [before/after run, {}]",
                     if hints.health_supported {
                         "rec y"
                     } else {
@@ -1135,7 +1138,7 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
                 WizardInput::Cancel => return Ok(None),
             },
             13 => match prompt_bool_default(
-                "Diag capture [rec n]",
+                "Diag capture [background sampler, rec n]",
                 profile.diagnostics.capture_during_test,
                 Some(
                     "Run the lightweight I/O sampler while the workload runs so you can spot interference from other processes.",
@@ -1185,7 +1188,12 @@ pub fn wizard(paths: &AppPaths, seed_profile: Option<Profile>) -> Result<Option<
         println!("3. Save and run now");
         println!("4. Back");
         println!("5. Cancel");
-        match prompt_menu_default_help("Action [1-5]", "4", &["1", "2", "3", "4", "5"], None)? {
+        match prompt_menu_default_help(
+            "Next step [1=save, 2=run, 3=save+run, 4=back, 5=cancel]",
+            "4",
+            &["1", "2", "3", "4", "5"],
+            None,
+        )? {
             WizardInput::Value(value) if value == "1" => {
                 profile.save(&profile_path)?;
                 println!("Saved profile: {}", profile_path.display());
@@ -1951,7 +1959,12 @@ fn run_profile_session_interactive(paths: &AppPaths, profile: Profile) -> Result
         println!("1. Repeat same test");
         println!("2. View this report");
         println!("3. Back");
-        match prompt_menu_default_help("Action [1-3]", "3", &["1", "2", "3"], None)? {
+        match prompt_menu_default_help(
+            "After run [1=repeat, 2=view report, 3=back]",
+            "3",
+            &["1", "2", "3"],
+            None,
+        )? {
             WizardInput::Value(value) if value == "1" => continue,
             WizardInput::Value(value) if value == "2" => {
                 run_report(paths, &session_id)?;

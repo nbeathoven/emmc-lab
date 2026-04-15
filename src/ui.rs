@@ -436,22 +436,22 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
 
         let run_table = vec![
             vec![
-                "Completed I/O".to_string(),
+                "Completed ops".to_string(),
                 run.read_ios_completed.to_string(),
                 run.write_ios_completed.to_string(),
             ],
             vec![
-                "Completed bytes".to_string(),
+                "Completed data".to_string(),
                 fmt_bytes(run.read_bytes_completed),
                 fmt_bytes(run.write_bytes_completed),
             ],
             vec![
-                "Failed I/O".to_string(),
+                "Failed ops".to_string(),
                 run.failed_reads.to_string(),
                 run.failed_writes.to_string(),
             ],
             vec![
-                "Partial I/O".to_string(),
+                "Partial ops".to_string(),
                 run.partial_reads.to_string(),
                 run.partial_writes.to_string(),
             ],
