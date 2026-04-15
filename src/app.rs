@@ -288,6 +288,7 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
     let session_id = session_id();
     let mut record = SessionRecord::new(session_id.clone());
     record.profile = Some(profile.clone());
+    record.discard_capability = detect_discard(&profile.target.path).ok();
     record.notes.push(
         "Logical sector/LBA targeting only. The application does not claim fixed physical NAND cell targeting."
             .to_string(),

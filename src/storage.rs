@@ -1,4 +1,5 @@
 use crate::diagnostics::DiagnosticReport;
+use crate::discard::DiscardCapability;
 use crate::engine::{IntervalStats, RunSummary};
 use crate::health::EmmcHealthSnapshot;
 use crate::profile::Profile;
@@ -19,6 +20,8 @@ pub struct SessionRecord {
     pub interval_stats: Vec<IntervalStats>,
     pub health_before: Option<EmmcHealthSnapshot>,
     pub health_after: Option<EmmcHealthSnapshot>,
+    #[serde(default)]
+    pub discard_capability: Option<DiscardCapability>,
     pub diagnostics: Option<DiagnosticReport>,
     pub notes: Vec<String>,
     pub contamination_note: Option<String>,
@@ -35,6 +38,7 @@ impl SessionRecord {
             interval_stats: Vec::new(),
             health_before: None,
             health_after: None,
+            discard_capability: None,
             diagnostics: None,
             notes: Vec::new(),
             contamination_note: None,

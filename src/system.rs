@@ -95,6 +95,15 @@ pub struct CapabilityReport {
     pub permission_level: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TraceCapabilities {
+    pub bpftrace_available: bool,
+    pub blktrace_available: bool,
+    pub debugfs_mounted: bool,
+    pub tracefs_available: bool,
+    pub is_root: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorCheck {
     pub name: String,
@@ -141,10 +150,13 @@ pub fn collect_system_snapshot() -> SystemSnapshot {
 }
 
 pub fn collect_capabilities(paths: &AppPaths) -> CapabilityReport {
+    let trace = detect_trace_capabilities();
     CapabilityReport {
         io_uring_available: io_uring_available(),
         direct_io_available: direct_io_viable(paths).unwrap_or(false),
-        deep_trace_available: deep_trace_available(),
+        deep_trace_available: trace.is_root
+            && ((trace.bpftrace_available && trace.tracefs_available)
+                || (trace.blktrace_available && trace.debugfs_mounted)),
         mmc_health_available: mmc_health_available(),
         procfs_access: Path::new("/proc/1").exists(),
         permission_level: if unsafe { libc::geteuid() } == 0 {
@@ -211,6 +223,19 @@ pub fn doctor(paths: &AppPaths) -> DoctorReport {
         } else {
             "deep trace unavailable; root and tracing facilities are required".to_string()
         },
+    });
+    let trace = detect_trace_capabilities();
+    checks.push(DoctorCheck {
+        name: "trace_backends".to_string(),
+        ok: trace.bpftrace_available || trace.blktrace_available,
+        detail: format!(
+            "bpftrace={}, blktrace={}, tracefs={}, debugfs={}, root={}",
+            bool_text(trace.bpftrace_available),
+            bool_text(trace.blktrace_available),
+            bool_text(trace.tracefs_available),
+            bool_text(trace.debugfs_mounted),
+            bool_text(trace.is_root)
+        ),
     });
     checks.push(DoctorCheck {
         name: "procfs_access".to_string(),
@@ -448,11 +473,21 @@ pub fn io_uring_available() -> bool {
 }
 
 pub fn deep_trace_available() -> bool {
-    let is_root = unsafe { libc::geteuid() } == 0;
-    let tracing = Path::new("/sys/kernel/tracing").exists()
-        || Path::new("/sys/kernel/debug/tracing").exists();
-    let bpf = Path::new("/sys/fs/bpf").exists();
-    is_root && (tracing || bpf)
+    let trace = detect_trace_capabilities();
+    trace.is_root
+        && ((trace.bpftrace_available && trace.tracefs_available)
+            || (trace.blktrace_available && trace.debugfs_mounted))
+}
+
+pub fn detect_trace_capabilities() -> TraceCapabilities {
+    TraceCapabilities {
+        bpftrace_available: command_exists("bpftrace"),
+        blktrace_available: command_exists("blktrace") && command_exists("blkparse"),
+        debugfs_mounted: Path::new("/sys/kernel/debug").exists(),
+        tracefs_available: Path::new("/sys/kernel/tracing").exists()
+            || Path::new("/sys/kernel/debug/tracing").exists(),
+        is_root: unsafe { libc::geteuid() } == 0,
+    }
 }
 
 pub fn direct_io_viable(paths: &AppPaths) -> Result<bool> {
@@ -652,6 +687,14 @@ fn ftl_transparency_note() -> DoctorCheck {
         name: "ftl_transparency".to_string(),
         ok: true,
         detail: "All host-side addresses are logical LBAs, not physical NAND locations. This is a fundamental constraint of all userspace eMMC tooling.".to_string(),
+    }
+}
+
+fn bool_text(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
     }
 }
 

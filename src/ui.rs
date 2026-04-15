@@ -559,6 +559,16 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
         if let Some(message) = &diag.fallback_message {
             out.push_str(&ui.note("Fallback:", message));
         }
+        if let Some(backend) = &diag.trace_backend {
+            out.push_str(&ui.note(
+                "Trace backend:",
+                &format!(
+                    "{} (events={})",
+                    backend,
+                    diag.trace_event_count.unwrap_or(0)
+                ),
+            ));
+        }
 
         let process_limit = row_limit(ui.height);
         let process_rows = diag
@@ -891,6 +901,10 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
         }
     }
 
+    if let Some(discard) = &record.discard_capability {
+        out.push_str(&ui.kv_table("Discard Capability", &discard_rows(discard), None));
+    }
+
     if let Some(before) = &record.health_before {
         let mut health_rows = vec![(
             "Before".to_string(),
@@ -1157,6 +1171,9 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
     if let Some(csd) = &report.emmc.csd {
         out.push_str(&ui.kv_table("CSD", &csd_rows(csd), Some(ui.width)));
     }
+    if let Some(discard) = &report.discard {
+        out.push_str(&ui.kv_table("Discard", &discard_rows(discard), Some(ui.width)));
+    }
     out.push_str(&ui.note("Note:", &report.emmc.note));
     if let Some(cid) = &report.emmc.cid {
         out.push_str(&ui.note(
@@ -1369,6 +1386,32 @@ fn csd_rows(csd: &crate::health::CsdInfo) -> Vec<(String, String)> {
                 bool_label(csd.tmp_write_protect),
                 bool_label(csd.wp_grp_enable)
             ),
+        ),
+    ]
+}
+
+fn discard_rows(discard: &crate::discard::DiscardCapability) -> Vec<(String, String)> {
+    vec![
+        (
+            "Supported".to_string(),
+            bool_label(discard.discard_supported),
+        ),
+        (
+            "Granularity".to_string(),
+            fmt_bytes(discard.discard_granularity),
+        ),
+        (
+            "Max bytes".to_string(),
+            fmt_bytes(discard.discard_max_bytes),
+        ),
+        (
+            "blkdiscard".to_string(),
+            bool_label(discard.blkdiscard_available),
+        ),
+        ("fstrim".to_string(), bool_label(discard.fstrim_available)),
+        (
+            "BLKDISCARD ioctl".to_string(),
+            bool_label(discard.blkdiscard_ioctl_viable),
         ),
     ]
 }
@@ -2855,7 +2898,7 @@ fn fmt_us(value: u64) -> String {
 }
 
 fn build_diag_rows(diag: &DiagnosticReport) -> Vec<(String, String)> {
-    vec![
+    let mut rows = vec![
         (
             "Mode".to_string(),
             format!("{:?}", diag.mode).to_lowercase(),
@@ -2908,7 +2951,15 @@ fn build_diag_rows(diag: &DiagnosticReport) -> Vec<(String, String)> {
             "Proc>Dev Write".to_string(),
             fmt_bytes(diag.process_excess_storage_write_bytes),
         ),
-    ]
+    ];
+    if let Some(backend) = &diag.trace_backend {
+        rows.push(("Trace Backend".to_string(), backend.clone()));
+        rows.push((
+            "Trace Events".to_string(),
+            diag.trace_event_count.unwrap_or(0).to_string(),
+        ));
+    }
+    rows
 }
 
 fn detect_hostname() -> String {

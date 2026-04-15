@@ -1,3 +1,4 @@
+use crate::discard::{detect_discard, DiscardCapability};
 use crate::system::{
     collect_capabilities, collect_system_snapshot, command_exists, AppPaths, SystemSnapshot,
 };
@@ -58,6 +59,7 @@ pub struct HealthReport {
     pub system: SystemSnapshot,
     pub capabilities: crate::system::CapabilityReport,
     pub emmc: EmmcHealthSnapshot,
+    pub discard: Option<DiscardCapability>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,6 +261,7 @@ pub fn collect_health(
         system: collect_system_snapshot(),
         capabilities: collect_capabilities(paths),
         emmc: read_emmc_health(device, page_size_kb, pages_per_block)?,
+        discard: detect_discard(device).ok(),
     })
 }
 
