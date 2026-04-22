@@ -1,3 +1,9 @@
 /target
 /.DS_Store
 *.swp
+
+# Local AI-agent workspace metadata must stay out of the repo.
+/.claude/
+/.codex/
+/.claude.json
+/.codex.json
