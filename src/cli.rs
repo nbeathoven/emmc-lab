@@ -75,6 +75,10 @@ enum Commands {
         #[arg(long)]
         html: Option<PathBuf>,
     },
+    Integrity {
+        #[command(subcommand)]
+        command: IntegrityCommand,
+    },
     Diag {
         #[command(subcommand)]
         command: DiagCommand,
@@ -112,6 +116,30 @@ enum DiagCommand {
         duration: u64,
         #[arg(long, default_value_t = true)]
         fallback_to_sampler: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum IntegrityCommand {
+    Capture {
+        #[arg(long)]
+        device: PathBuf,
+        #[arg(long)]
+        algorithm: String,
+        #[arg(long)]
+        session: String,
+    },
+    Verify {
+        #[arg(long)]
+        device: PathBuf,
+        #[arg(long)]
+        session: String,
+        #[arg(long)]
+        note: String,
+    },
+    History {
+        #[arg(long)]
+        session: String,
     },
 }
 
@@ -175,6 +203,19 @@ pub fn run() -> Result<()> {
             trace_report.as_deref(),
             html.as_deref(),
         ),
+        Some(Commands::Integrity { command }) => match command {
+            IntegrityCommand::Capture {
+                device,
+                algorithm,
+                session,
+            } => app::run_integrity_capture(&paths, &session, &device, &algorithm),
+            IntegrityCommand::Verify {
+                device,
+                session,
+                note,
+            } => app::run_integrity_verify(&paths, &session, &device, &note),
+            IntegrityCommand::History { session } => app::run_integrity_history(&paths, &session),
+        },
         Some(Commands::Diag { command }) => match command {
             DiagCommand::Monitor {
                 duration,

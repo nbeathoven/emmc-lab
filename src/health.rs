@@ -1,5 +1,6 @@
 use crate::system::{
-    collect_capabilities, collect_system_snapshot, command_exists, AppPaths, SystemSnapshot,
+    collect_capabilities, collect_system_snapshot, command_exists, detect_cqhci,
+    read_mmc_host_state, AppPaths, MmcHostState, SystemSnapshot,
 };
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
@@ -8,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[cfg(target_os = "linux")]
+use crate::system::read_trimmed;
+#[cfg(target_os = "linux")]
 use std::fs::{self, File};
 #[cfg(target_os = "linux")]
 use std::io;
@@ -15,8 +18,6 @@ use std::io;
 use std::mem::size_of;
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
-#[cfg(target_os = "linux")]
-use crate::system::read_trimmed;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -37,6 +38,8 @@ pub struct EmmcHealthSnapshot {
     pub bkops_urgency: Option<String>,
     pub cache_size_kb: Option<u64>,
     pub cache_ctrl: Option<u8>,
+    pub cmdq_support: Option<u8>,
+    pub cmdq_depth: Option<u8>,
     pub erase_group_size_bytes: Option<u64>,
     pub hc_erase_grp_size: Option<u64>,
     pub firmware_version: Option<String>,
@@ -54,6 +57,8 @@ pub struct HealthReport {
     pub system: SystemSnapshot,
     pub capabilities: crate::system::CapabilityReport,
     pub emmc: EmmcHealthSnapshot,
+    #[serde(default)]
+    pub mmc_host_state: Option<MmcHostState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +89,12 @@ pub struct CidInfo {
     pub raw_hex: String,
 }
 
+impl CidInfo {
+    pub fn manufacturer_id_hex(&self) -> String {
+        format!("0x{:02X}", self.mid)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "vendor")]
 pub enum VendorSpecificInfo {
@@ -100,10 +111,13 @@ pub fn collect_health(
     page_size_kb: Option<u64>,
     pages_per_block: Option<u64>,
 ) -> Result<HealthReport> {
+    let mut capabilities = collect_capabilities(paths);
+    capabilities.cqhci = Some(detect_cqhci(device));
     Ok(HealthReport {
         system: collect_system_snapshot(),
-        capabilities: collect_capabilities(paths),
+        capabilities,
         emmc: read_emmc_health(device, page_size_kb, pages_per_block)?,
+        mmc_host_state: read_mmc_host_state(device).ok(),
     })
 }
 
@@ -122,6 +136,9 @@ pub fn read_emmc_health(
         ));
     }
 
+    // Prefer the raw register path first so we get stable structured data and avoid
+    // depending on a userspace formatter. Keep mmc-utils as the last fallback for
+    // systems where ioctl/debugfs access is blocked or not compiled in.
     match read_ext_csd_with_fallback(&canonical_device) {
         Ok((raw, source)) => {
             let mut snapshot = parse_ext_csd(&raw, page_size_kb, pages_per_block);
@@ -156,6 +173,9 @@ pub fn read_emmc_health(
                     ),
                 ));
             }
+
+            // mmc-utils output is less complete than the raw path above, but it still gives
+            // older systems a useful health snapshot instead of a hard failure.
             let output = Command::new("mmc")
                 .arg("extcsd")
                 .arg("read")
@@ -251,7 +271,10 @@ fn is_mmc_device(device: &Path) -> bool {
 }
 
 fn canonical_mmc_device_path(device: &Path) -> PathBuf {
-    let Some(name) = device.file_name().map(|value| value.to_string_lossy().to_string()) else {
+    let Some(name) = device
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+    else {
         return device.to_path_buf();
     };
     if !name.starts_with("mmcblk") {
@@ -300,6 +323,8 @@ fn parse_ext_csd(
         bkops_urgency: Some(bkops_urgency_label(bkops_status).to_string()),
         cache_size_kb: Some(cache_size_kb),
         cache_ctrl: Some(raw[33]),
+        cmdq_support: Some(raw[308]),
+        cmdq_depth: Some(raw[307]),
         erase_group_size_bytes: compute_erase_block_size_bytes(raw),
         hc_erase_grp_size: (raw[224] != 0).then_some(raw[224] as u64),
         firmware_version,
@@ -354,7 +379,9 @@ pub fn build_read_disturb_model(input: ReadDisturbInput) -> ReadDisturbModel {
         .page_size_kb
         .saturating_mul(1024)
         .saturating_mul(input.pages_per_block);
-    if block_size_bytes == 0 || input.device_capacity_bytes == 0 || input.read_disturb_threshold == 0
+    if block_size_bytes == 0
+        || input.device_capacity_bytes == 0
+        || input.read_disturb_threshold == 0
     {
         caveats.push(
             "One or more required geometry inputs was zero, so the estimate could not be normalized."
@@ -405,30 +432,89 @@ fn cache_confirmed_absent(raw: &[u8; 512]) -> bool {
 #[cfg(target_os = "linux")]
 fn read_cid_sysfs(device: &Path) -> Result<CidInfo> {
     let sys_dir = block_device_sys_dir(device);
-    let raw_hex = read_trimmed(sys_dir.join("device/cid")).ok_or_else(|| {
-        anyhow!(
-            "missing CID sysfs entry for {}",
-            device.display()
-        )
-    })?;
-    let mid = read_trimmed(sys_dir.join("device/manfid"))
-        .and_then(|value| parse_sysfs_hex_u64(&value))
-        .map(|value| value as u8)
-        .ok_or_else(|| anyhow!("missing or invalid manfid sysfs entry"))?;
-    Ok(CidInfo {
-        mid,
-        oid: read_trimmed(sys_dir.join("device/oemid")).unwrap_or_else(|| "-".to_string()),
-        pnm: read_trimmed(sys_dir.join("device/name")).unwrap_or_else(|| "-".to_string()),
-        prv: read_trimmed(sys_dir.join("device/fwrev")).unwrap_or_else(|| "-".to_string()),
-        psn: read_trimmed(sys_dir.join("device/serial")).unwrap_or_else(|| "-".to_string()),
-        mdt: read_trimmed(sys_dir.join("device/date")).unwrap_or_else(|| "-".to_string()),
-        raw_hex,
-    })
+    let raw_hex = read_trimmed(sys_dir.join("device/cid"))
+        .or_else(|| read_cid_from_bus_sysfs(device))
+        .ok_or_else(|| anyhow!("missing CID sysfs entry for {}", device.display()))?;
+    parse_cid_hex(&raw_hex)
 }
 
 #[cfg(not(target_os = "linux"))]
 fn read_cid_sysfs(_device: &Path) -> Result<CidInfo> {
     Err(anyhow!("not supported on this platform"))
+}
+
+#[cfg(target_os = "linux")]
+fn read_cid_from_bus_sysfs(device: &Path) -> Option<String> {
+    let sys_dir = fs::canonicalize(block_device_sys_dir(device).join("device")).ok()?;
+    let card = sys_dir.file_name()?.to_string_lossy().to_string();
+    read_trimmed(Path::new("/sys/bus/mmc/devices").join(card).join("cid"))
+}
+
+/// Decode the 16-byte eMMC CID register from its 32-character sysfs hex form.
+pub fn parse_cid_hex(raw_hex: &str) -> Result<CidInfo> {
+    let cleaned = raw_hex
+        .trim()
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != ':')
+        .collect::<String>();
+    if cleaned.len() != 32 || !cleaned.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err(anyhow!("CID must be a 32-character hexadecimal string"));
+    }
+    let mut raw = [0_u8; 16];
+    for (idx, byte) in raw.iter_mut().enumerate() {
+        let start = idx * 2;
+        *byte = u8::from_str_radix(&cleaned[start..start + 2], 16)
+            .with_context(|| format!("invalid CID byte at offset {idx}"))?;
+    }
+
+    let pnm = raw[3..9]
+        .iter()
+        .copied()
+        .filter(|byte| byte.is_ascii_graphic() || *byte == b' ')
+        .map(char::from)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    let psn = u32::from_be_bytes([raw[10], raw[11], raw[12], raw[13]]);
+    let month = raw[14] & 0x0f;
+    let year = 2013 + ((raw[14] >> 4) as u16);
+
+    Ok(CidInfo {
+        mid: raw[0],
+        oid: raw[1..3]
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<Vec<_>>()
+            .join(""),
+        pnm,
+        prv: format!("{}.{}", raw[9] >> 4, raw[9] & 0x0f),
+        psn: format!("0x{psn:08X}"),
+        mdt: format_manufacturing_date(month, year),
+        raw_hex: cleaned.to_ascii_lowercase(),
+    })
+}
+
+fn format_manufacturing_date(month: u8, year: u16) -> String {
+    let month_name = match month {
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
+        _ => "Unknown",
+    };
+    if month_name == "Unknown" {
+        format!("Unknown {year}")
+    } else {
+        format!("{month_name} {year}")
+    }
 }
 
 fn parse_vendor_specific(raw: &[u8; 512], cid: &CidInfo) -> VendorSpecificInfo {
@@ -573,7 +659,10 @@ fn read_ext_csd_debugfs(device: &Path) -> Result<[u8; 512]> {
         .map(|value| value.to_string_lossy().to_string())
         .ok_or_else(|| anyhow!("failed to derive MMC card from sysfs path"))?;
     let candidates = [
-        PathBuf::from("/sys/kernel/debug").join(&host).join(&card).join("ext_csd"),
+        PathBuf::from("/sys/kernel/debug")
+            .join(&host)
+            .join(&card)
+            .join("ext_csd"),
         PathBuf::from("/sys/kernel/debug")
             .join("mmc")
             .join(&host)
@@ -624,7 +713,9 @@ fn read_csd_structure_sysfs(device: &Path) -> Result<Option<u8>> {
     let Some(first) = csd.chars().next() else {
         return Ok(None);
     };
-    let nibble = first.to_digit(16).ok_or_else(|| anyhow!("invalid CSD hex"))?;
+    let nibble = first
+        .to_digit(16)
+        .ok_or_else(|| anyhow!("invalid CSD hex"))?;
     Ok(Some((nibble >> 2) as u8))
 }
 
@@ -640,17 +731,6 @@ fn block_device_sys_dir(device: &Path) -> PathBuf {
         .map(|value| value.to_string_lossy().to_string())
         .unwrap_or_default();
     PathBuf::from("/sys/class/block").join(name)
-}
-
-#[cfg(target_os = "linux")]
-fn parse_sysfs_hex_u64(value: &str) -> Option<u64> {
-    value
-        .trim()
-        .trim_start_matches("0x")
-        .trim_start_matches("0X")
-        .parse::<u64>()
-        .ok()
-        .or_else(|| u64::from_str_radix(value.trim().trim_start_matches("0x"), 16).ok())
 }
 
 #[cfg(target_os = "linux")]
@@ -692,10 +772,8 @@ const MMC_SEND_EXT_CSD: u32 = 8;
 
 #[cfg(target_os = "linux")]
 const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> libc::c_ulong {
-    ((dir << IOC_DIRSHIFT)
-        | (ty << IOC_TYPESHIFT)
-        | (nr << IOC_NRSHIFT)
-        | (size << IOC_SIZESHIFT)) as libc::c_ulong
+    ((dir << IOC_DIRSHIFT) | (ty << IOC_TYPESHIFT) | (nr << IOC_NRSHIFT) | (size << IOC_SIZESHIFT))
+        as libc::c_ulong
 }
 
 #[cfg(target_os = "linux")]
@@ -723,15 +801,14 @@ struct MmcIocCmd {
 }
 
 #[cfg(target_os = "linux")]
-const MMC_IOC_CMD: libc::c_ulong =
-    iowr(MMC_BLOCK_MAJOR, 0, size_of::<MmcIocCmd>() as u32);
+const MMC_IOC_CMD: libc::c_ulong = iowr(MMC_BLOCK_MAJOR, 0, size_of::<MmcIocCmd>() as u32);
 
 #[cfg(test)]
 mod tests {
     use super::{
         bkops_urgency_label, build_read_disturb_model, compute_erase_block_size_bytes,
-        parse_ext_csd, parse_extcsd_field, parse_vendor_specific, CidInfo, ReadDisturbInput,
-        VendorSpecificInfo,
+        parse_cid_hex, parse_ext_csd, parse_extcsd_field, parse_vendor_specific, CidInfo,
+        ReadDisturbInput, VendorSpecificInfo,
     };
 
     #[test]
@@ -757,6 +834,8 @@ mod tests {
         raw[246] = 2;
         raw[249..253].copy_from_slice(&0_u32.to_le_bytes());
         raw[254..262].copy_from_slice(b"FW123456");
+        raw[307] = 31;
+        raw[308] = 1;
         raw[267] = 1;
         raw[268] = 3;
         raw[269] = 4;
@@ -766,7 +845,10 @@ mod tests {
         assert_eq!(snapshot.device_type, Some(0x57));
         assert_eq!(snapshot.sec_count, Some(0x0010_0000));
         assert_eq!(snapshot.bkops_status, Some(2));
-        assert_eq!(snapshot.bkops_urgency.as_deref(), Some("performance impacted"));
+        assert_eq!(
+            snapshot.bkops_urgency.as_deref(),
+            Some("performance impacted")
+        );
         assert_eq!(snapshot.device_life_time_est_typ_a.as_deref(), Some("0x03"));
         assert_eq!(snapshot.device_life_time_est_typ_b.as_deref(), Some("0x04"));
         assert_eq!(snapshot.pre_eol_info.as_deref(), Some("0x01"));
@@ -776,6 +858,8 @@ mod tests {
         assert_eq!(snapshot.page_size_kb, Some(16));
         assert_eq!(snapshot.pages_per_block, Some(256));
         assert_eq!(snapshot.cache_size_kb, Some(0));
+        assert_eq!(snapshot.cmdq_support, Some(1));
+        assert_eq!(snapshot.cmdq_depth, Some(31));
         assert_eq!(snapshot.bkops_support, Some(true));
         assert_eq!(compute_erase_block_size_bytes(&raw), Some(4_194_304));
     }
@@ -816,6 +900,23 @@ mod tests {
             VendorSpecificInfo::Unknown { raw_bytes } => assert_eq!(raw_bytes.len(), 64),
             other => panic!("unexpected vendor decode: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_runtime_cid_register() {
+        let cid = parse_cid_hex("0101005334303030340148190d528700").expect("cid");
+        assert_eq!(cid.mid, 0x01);
+        assert_eq!(cid.manufacturer_id_hex(), "0x01");
+        assert_eq!(cid.pnm, "S40004");
+        assert_eq!(cid.psn, "0x48190D52");
+        assert_eq!(cid.mdt, "July 2021");
+        assert_eq!(cid.raw_hex, "0101005334303030340148190d528700");
+    }
+
+    #[test]
+    fn rejects_malformed_cid_registers() {
+        assert!(parse_cid_hex("0101").is_err());
+        assert!(parse_cid_hex("zz01005334303030340148190d528700").is_err());
     }
 
     #[test]

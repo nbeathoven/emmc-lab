@@ -75,9 +75,14 @@ pub fn compare_health(
     trace_report: Option<&LbaTraceReport>,
     block_size_bytes: Option<u64>,
 ) -> Result<HealthCompareReport> {
+    // Keep the live read and the FA file load together here so the caller gets one
+    // comparison object built from a single point-in-time snapshot.
     let local = collect_health(paths, device, None, None)?.emmc;
     let fa_report = load_fa_report(fa_report_path)?;
     let field_comparisons = compare_extcsd_fields(&local, &fa_report);
+
+    // Correlation is optional because some users only have the FA export and live
+    // EXT_CSD state, not a matching LBA trace capture.
     let correlation = trace_report.and_then(|trace| {
         let block_size_bytes = block_size_bytes.or(local.erase_group_size_bytes)?;
         Some(correlate_block_ranges(trace, &fa_report, block_size_bytes))
@@ -92,8 +97,8 @@ pub fn compare_health(
 
 /// Load and validate the FA JSON schema.
 fn load_fa_report(path: &Path) -> Result<FaReport> {
-    let text = fs::read_to_string(path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
+    let text =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     let report: FaReport = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     if report.schema_version != "1.0" {
@@ -146,7 +151,10 @@ fn compare_numeric_field(field: &str, local: Option<u8>, fa: Option<u8>) -> Comp
     };
     let detail = match status {
         "match" => "live device agrees with the FA snapshot".to_string(),
-        "worse" => "live value is higher than the FA snapshot and indicates additional wear or pressure".to_string(),
+        "worse" => {
+            "live value is higher than the FA snapshot and indicates additional wear or pressure"
+                .to_string()
+        }
         "drift" => "live value differs from the FA snapshot but is not higher".to_string(),
         _ => "one side did not provide a comparable value".to_string(),
     };
@@ -165,7 +173,9 @@ fn parse_hexish_u8(value: Option<&str>) -> Option<u8> {
         .strip_prefix("0x")
         .or_else(|| value.strip_prefix("0X"))
         .unwrap_or(value);
-    u8::from_str_radix(value, 16).ok().or_else(|| value.parse::<u8>().ok())
+    u8::from_str_radix(value, 16)
+        .ok()
+        .or_else(|| value.parse::<u8>().ok())
 }
 
 /// Correlate FA bad-block LBA ranges with observed trace traffic.
@@ -186,8 +196,8 @@ fn correlate_block_ranges(
                 continue;
             }
             matched = true;
-            total_overlapping_lbas = total_overlapping_lbas
-                .saturating_add(overlap_end.saturating_sub(overlap_start));
+            total_overlapping_lbas =
+                total_overlapping_lbas.saturating_add(overlap_end.saturating_sub(overlap_start));
             overlapping_ranges.push(CorrelationHit {
                 lba_range: (overlap_start, overlap_end),
                 failure_type: bad_range.failure_type.clone(),

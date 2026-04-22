@@ -1,7 +1,9 @@
 use crate::diagnostics::DiagnosticReport;
-use crate::health::HealthReport;
+use crate::health::{CidInfo, HealthReport};
 use crate::storage::SessionRecord;
-use crate::system::{AppPaths, CapabilityReport, DeviceInfo, DoctorReport, SystemSnapshot};
+use crate::system::{
+    decode_ocr, AppPaths, CapabilityReport, DeviceInfo, DoctorReport, DoctorStatus, SystemSnapshot,
+};
 use std::cmp::min;
 use std::cmp::Reverse;
 use std::env;
@@ -253,7 +255,7 @@ impl Ui {
         let header = columns
             .iter()
             .enumerate()
-            .map(|(index, column)| self.cell(column.header, widths[index], column.align))
+            .map(|(index, column)| self.header_cell(column.header, widths[index], column.align))
             .collect::<Vec<_>>();
         let _ = writeln!(
             &mut out,
@@ -316,6 +318,31 @@ impl Ui {
             &sanitized
         };
         let truncated = truncate_text(display, width);
+        let pad = width.saturating_sub(truncated.chars().count());
+        match align {
+            Align::Left => format!(" {}{} ", truncated, " ".repeat(pad)),
+            Align::Right => format!(" {}{} ", " ".repeat(pad), truncated),
+        }
+    }
+
+    /// Like `cell` but for header labels: uses tail-preserving truncation so
+    /// that unit suffixes such as "R/s" or "W/s" remain visible even when the
+    /// column is squeezed.  Headers are never treated as file-paths, so the
+    /// middle-abbreviation that `truncate_text` applies to strings containing
+    /// '/' is intentionally avoided here.
+    fn header_cell(&self, value: &str, width: usize, align: Align) -> String {
+        let len = value.chars().count();
+        let truncated: String = if len <= width {
+            value.to_string()
+        } else if width == 0 {
+            String::new()
+        } else if width == 1 {
+            ELLIPSIS.to_string()
+        } else {
+            // Keep the tail so that unit suffixes ("R/s", "W/s") stay readable.
+            let tail: String = value.chars().skip(len.saturating_sub(width - 1)).collect();
+            format!("{ELLIPSIS}{tail}")
+        };
         let pad = width.saturating_sub(truncated.chars().count());
         match align {
             Align::Left => format!(" {}{} ", truncated, " ".repeat(pad)),
@@ -617,31 +644,31 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
                             },
                             Column {
                                 header: "Log R/s",
-                                min: 10,
+                                min: 8,
                                 max: 12,
                                 align: Align::Right,
                             },
                             Column {
                                 header: "Log W/s",
-                                min: 10,
+                                min: 8,
                                 max: 12,
                                 align: Align::Right,
                             },
                             Column {
-                                header: "Store R/s",
-                                min: 10,
+                                header: "Stor R/s",
+                                min: 9,
                                 max: 12,
                                 align: Align::Right,
                             },
                             Column {
-                                header: "Store W/s",
-                                min: 10,
+                                header: "Stor W/s",
+                                min: 9,
                                 max: 12,
                                 align: Align::Right,
                             },
                             Column {
                                 header: "Share",
-                                min: 7,
+                                min: 6,
                                 max: 8,
                                 align: Align::Right,
                             },
@@ -914,6 +941,48 @@ pub(crate) fn render_session_summary(record: &SessionRecord) -> String {
             ));
         }
         out.push_str(&ui.kv_table("Health Snapshots", &health_rows, None));
+        if let Some(cid) = before.cid.as_ref().or_else(|| {
+            record
+                .health_after
+                .as_ref()
+                .and_then(|after| after.cid.as_ref())
+        }) {
+            out.push_str(&ui.kv_table("Device Identity", &cid_rows(cid), None));
+        }
+    }
+
+    if !record.integrity_baselines.is_empty() || !record.integrity_verifications.is_empty() {
+        let mut integrity_rows = Vec::new();
+        for baseline in &record.integrity_baselines {
+            integrity_rows.push((
+                "Baseline".to_string(),
+                format!(
+                    "{} offset={} length={} {:?} {}",
+                    baseline.device.display(),
+                    baseline.region_offset_bytes,
+                    baseline.region_size_actual,
+                    baseline.algorithm,
+                    baseline.checksum_hex
+                ),
+            ));
+        }
+        for verification in &record.integrity_verifications {
+            integrity_rows.push((
+                if verification.matches {
+                    "Verify PASS".to_string()
+                } else {
+                    "Verify FAIL".to_string()
+                },
+                format!(
+                    "{} checked={} baseline={} note={}",
+                    verification.baseline.device.display(),
+                    verification.verified_checksum_hex,
+                    verification.baseline.checksum_hex,
+                    verification.note
+                ),
+            ));
+        }
+        out.push_str(&ui.kv_table("U-Boot Sector Verification", &integrity_rows, None));
     }
 
     if let Some(note) = &record.contamination_note {
@@ -1095,6 +1164,16 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
             },
         ),
         (
+            "CMDQ".to_string(),
+            match (report.emmc.cmdq_support, report.emmc.cmdq_depth) {
+                (Some(support), Some(depth)) => {
+                    format!("support=0x{support:02x} depth={}", depth + 1)
+                }
+                (Some(support), None) => format!("support=0x{support:02x}"),
+                _ => "-".to_string(),
+            },
+        ),
+        (
             "Erase Block".to_string(),
             report
                 .emmc
@@ -1111,6 +1190,41 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
         |ui| ui.kv_table("System", &system_rows, Some(ui.width)),
         |ui| ui.kv_table("eMMC Health", &emmc_rows, Some(ui.width)),
     ));
+    if let Some(host) = &report.mmc_host_state {
+        let host_rows = vec![
+            ("Host".to_string(), host.mmc_host.clone()),
+            ("Card Present".to_string(), bool_label(host.card_present)),
+            ("Card Type".to_string(), opt_text(host.card_type.as_deref())),
+            (
+                "Card State".to_string(),
+                opt_text(host.card_state.as_deref()),
+            ),
+            (
+                "IOS Clock".to_string(),
+                host.ios_clock_hz
+                    .map(|value| format!("{value} Hz"))
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+            (
+                "Bus Width".to_string(),
+                host.ios_bus_width
+                    .map(|value| format!("{value} bits"))
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+            ("Timing".to_string(), opt_text(host.ios_timing.as_deref())),
+            (
+                "OCR".to_string(),
+                host.ocr.map(decode_ocr).unwrap_or_else(|| "-".to_string()),
+            ),
+            (
+                "CMDQ Enabled".to_string(),
+                host.cmdq_enabled
+                    .map(bool_label)
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        ];
+        out.push_str(&ui.kv_table("MMC Host", &host_rows, None));
+    }
     let health_meaning_rows = health_meaning_rows(report);
     if !health_meaning_rows.is_empty() {
         out.push_str(&ui.table(
@@ -1141,13 +1255,7 @@ pub(crate) fn render_health_report(report: &HealthReport) -> String {
     }
     out.push_str(&ui.note("Note:", &report.emmc.note));
     if let Some(cid) = &report.emmc.cid {
-        out.push_str(&ui.note(
-            "CID:",
-            &format!(
-                "MID=0x{:02x} OID={} PNM={} PRV={} PSN={} MDT={}",
-                cid.mid, cid.oid, cid.pnm, cid.prv, cid.psn, cid.mdt
-            ),
-        ));
+        out.push_str(&ui.kv_table("Device Identity", &cid_rows(cid), None));
     }
     if let Some(vendor) = &report.emmc.vendor_info {
         let detail = match vendor {
@@ -1218,6 +1326,19 @@ fn health_meaning_rows(report: &HealthReport) -> Vec<Vec<String>> {
         ]);
     }
     rows
+}
+
+fn cid_rows(cid: &CidInfo) -> Vec<(String, String)> {
+    vec![
+        ("Manufacturer ID".to_string(), cid.manufacturer_id_hex()),
+        ("Product Name".to_string(), opt_text(Some(cid.pnm.as_str()))),
+        (
+            "Serial Number".to_string(),
+            opt_text(Some(cid.psn.as_str())),
+        ),
+        ("Manufactured".to_string(), opt_text(Some(cid.mdt.as_str()))),
+        ("Raw CID".to_string(), opt_text(Some(cid.raw_hex.as_str()))),
+    ]
 }
 
 fn decode_life_time_bucket(raw: &str) -> String {
@@ -1395,37 +1516,37 @@ pub(crate) fn render_live_monitor(
                 },
                 Column {
                     header: "Log R/s",
-                    min: 10,
+                    min: 8,
                     max: 12,
                     align: Align::Right,
                 },
                 Column {
                     header: "Log W/s",
-                    min: 10,
+                    min: 8,
                     max: 12,
                     align: Align::Right,
                 },
                 Column {
-                    header: "Store R/s",
-                    min: 10,
+                    header: "Stor R/s",
+                    min: 9,
                     max: 12,
                     align: Align::Right,
                 },
                 Column {
-                    header: "Store W/s",
-                    min: 10,
+                    header: "Stor W/s",
+                    min: 9,
                     max: 12,
                     align: Align::Right,
                 },
                 Column {
                     header: "Store R",
-                    min: 10,
+                    min: 8,
                     max: 11,
                     align: Align::Right,
                 },
                 Column {
                     header: "Store W",
-                    min: 10,
+                    min: 8,
                     max: 11,
                     align: Align::Right,
                 },
@@ -1619,37 +1740,37 @@ pub(crate) fn render_live_monitor(
                             },
                             Column {
                                 header: "Log R/s",
-                                min: 10,
+                                min: 8,
                                 max: 12,
                                 align: Align::Right,
                             },
                             Column {
                                 header: "Log W/s",
-                                min: 10,
+                                min: 8,
                                 max: 12,
                                 align: Align::Right,
                             },
                             Column {
-                                header: "Store R/s",
-                                min: 10,
+                                header: "Stor R/s",
+                                min: 9,
                                 max: 12,
                                 align: Align::Right,
                             },
                             Column {
-                                header: "Store W/s",
-                                min: 10,
+                                header: "Stor W/s",
+                                min: 9,
                                 max: 12,
                                 align: Align::Right,
                             },
                             Column {
                                 header: "Store R",
-                                min: 10,
+                                min: 8,
                                 max: 11,
                                 align: Align::Right,
                             },
                             Column {
                                 header: "Store W",
-                                min: 10,
+                                min: 8,
                                 max: 11,
                                 align: Align::Right,
                             },
@@ -1852,10 +1973,10 @@ pub(crate) fn render_doctor_report(report: &DoctorReport) -> String {
         .iter()
         .map(|check| {
             vec![
-                if check.ok {
-                    "OK".to_string()
-                } else {
-                    "WARN".to_string()
+                match check.status {
+                    DoctorStatus::Pass => "PASS".to_string(),
+                    DoctorStatus::Warn => "WARN".to_string(),
+                    DoctorStatus::Fail => "FAIL".to_string(),
                 },
                 check.name.clone(),
                 check.detail.clone(),
@@ -2036,7 +2157,7 @@ fn system_rows(system: &SystemSnapshot) -> Vec<(String, String)> {
 }
 
 fn capability_rows(caps: &CapabilityReport) -> Vec<(String, String)> {
-    vec![
+    let mut rows = vec![
         ("io_uring".to_string(), bool_label(caps.io_uring_available)),
         (
             "Direct I/O".to_string(),
@@ -2052,7 +2173,29 @@ fn capability_rows(caps: &CapabilityReport) -> Vec<(String, String)> {
         ),
         ("procfs".to_string(), bool_label(caps.procfs_access)),
         ("Permission".to_string(), caps.permission_level.clone()),
-    ]
+    ];
+    if let Some(cqhci) = &caps.cqhci {
+        rows.push((
+            "CQHCI".to_string(),
+            format!(
+                "host={} enabled={} risk={:?}",
+                cqhci.mmc_host, cqhci.cmdq_enabled, cqhci.risk
+            ),
+        ));
+    }
+    rows
+}
+
+pub(crate) fn render_warning_banner(title: &str, body: &str) -> String {
+    let ui = Ui::detect();
+    let mut out = String::new();
+    let width = ui.width.min(100).max(32);
+    let line = "!".repeat(width);
+    let _ = writeln!(&mut out, "{}", ui.paint(&line, "1;33"));
+    let _ = writeln!(&mut out, "{}", ui.paint(title, "1;33"));
+    let _ = writeln!(&mut out, "{}", body.trim());
+    let _ = writeln!(&mut out, "{}", ui.paint(&line, "1;33"));
+    out
 }
 
 fn device_columns<'a>() -> [Column<'a>; 7] {
