@@ -75,9 +75,14 @@ pub fn compare_health(
     trace_report: Option<&LbaTraceReport>,
     block_size_bytes: Option<u64>,
 ) -> Result<HealthCompareReport> {
+    // Keep the live read and the FA file load together here so the caller gets one
+    // comparison object built from a single point-in-time snapshot.
     let local = collect_health(paths, device, None, None)?.emmc;
     let fa_report = load_fa_report(fa_report_path)?;
     let field_comparisons = compare_extcsd_fields(&local, &fa_report);
+
+    // Correlation is optional because some users only have the FA export and live
+    // EXT_CSD state, not a matching LBA trace capture.
     let correlation = trace_report.and_then(|trace| {
         let block_size_bytes = block_size_bytes.or(local.erase_group_size_bytes)?;
         Some(correlate_block_ranges(trace, &fa_report, block_size_bytes))

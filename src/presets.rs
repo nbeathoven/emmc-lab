@@ -32,6 +32,7 @@ pub enum PresetId {
     OneSectorMillionReads,
     OneSectorMillionWrites,
     InterferenceCheck,
+    ConcurrentPartitionStress,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -140,6 +141,14 @@ pub const BUILTIN_PRESETS: &[PresetSpec] = &[
         name: "Interference Check",
         description: "File-backed mixed workload with diagnostic capture enabled to spot outside I/O interference.",
         destructive: false,
+    },
+    PresetSpec {
+        id: PresetId::ConcurrentPartitionStress,
+        category: PresetCategory::Diagnostics,
+        target_scope: PresetTargetScope::Partition,
+        name: "Concurrent Partition Stress",
+        description: "Read selected boot-partition sectors while writing a user partition, with before/after md5 verification.",
+        destructive: true,
     },
 ];
 
@@ -344,6 +353,18 @@ fn apply_preset_shape(
             profile.diagnostics.capture_during_test = true;
             profile.durability.mode = DurabilityMode::BatchDurable;
         }
+        PresetId::ConcurrentPartitionStress => {
+            profile.workload.test_type = WorkloadType::Write;
+            profile.workload.runtime_seconds = None;
+            profile.workload.exact_op_count = Some(1000);
+            profile.workload.block_size_bytes = 200 * 1024;
+            profile.addressing.mode = AddressingMode::ByteRange;
+            profile.addressing.start_offset_bytes = Some(0);
+            profile.addressing.range_size_bytes = Some(1024 * 1024 * 1024);
+            profile.workload.direct_io = true;
+            profile.durability.mode = DurabilityMode::BatchDurable;
+            profile.telemetry.health_telemetry = true;
+        }
     }
 }
 
@@ -381,6 +402,7 @@ pub fn preset_slug(id: PresetId) -> &'static str {
         PresetId::OneSectorMillionReads => "one-sector-1m-reads",
         PresetId::OneSectorMillionWrites => "one-sector-1m-writes",
         PresetId::InterferenceCheck => "interference-check",
+        PresetId::ConcurrentPartitionStress => "concurrent-partition-stress",
     }
 }
 

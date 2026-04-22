@@ -2,6 +2,7 @@ use anyhow::Result;
 use emmc_lab::app::{run_diag_trace, run_profile_session};
 use emmc_lab::engine::execute_profile;
 use emmc_lab::health::read_emmc_health;
+use emmc_lab::integrity::ChecksumAlgorithm;
 use emmc_lab::profile::{AddressingMode, Profile, TargetMode, WorkloadType};
 use emmc_lab::report::{export_session, ExportFormat};
 use emmc_lab::storage::{
@@ -109,6 +110,48 @@ fn combined_test_and_diagnostics_session_is_saved() -> Result<()> {
     let session = load_session(&paths, &session_id)?;
     assert!(session.run_summary.is_some());
     assert!(session.diagnostics.is_some());
+    Ok(())
+}
+
+#[test]
+fn run_session_auto_verifies_integrity_regions() -> Result<()> {
+    let (_dir, paths) = temp_paths()?;
+    let target = paths.base_dir.join("integrity-target.bin");
+    fs::write(&target, vec![0x5a; 4096 * 8])?;
+    let mut profile = Profile::default_named("integrity-read");
+    profile.target.mode = TargetMode::FileBased;
+    profile.target.path = target.clone();
+    profile.target.create_if_missing_size_bytes = None;
+    profile.workload.test_type = WorkloadType::Read;
+    profile.workload.block_size_bytes = 4096;
+    profile.workload.runtime_seconds = None;
+    profile.workload.exact_op_count = Some(4);
+    profile.addressing.mode = AddressingMode::ByteRange;
+    profile.addressing.start_offset_bytes = Some(0);
+    profile.addressing.range_size_bytes = Some(4096 * 4);
+    profile.telemetry.health_telemetry = false;
+    profile.reporting.export_json = false;
+    profile.reporting.export_csv = false;
+    profile.reporting.export_html = false;
+    profile
+        .integrity
+        .push(emmc_lab::profile::IntegrityRegionConfig {
+            device: target,
+            offset_bytes: 0,
+            length_bytes: 4096 * 4,
+            algorithm: ChecksumAlgorithm::Md5,
+            capture_before_run: true,
+        });
+
+    let session_id = run_profile_session(&paths, profile)?;
+    let session = load_session(&paths, &session_id)?;
+    assert_eq!(session.integrity_baselines.len(), 1);
+    assert_eq!(session.integrity_verifications.len(), 1);
+    assert!(session.integrity_verifications[0].matches);
+    assert!(session.integrity_baselines[0]
+        .snapshot_path
+        .as_ref()
+        .is_some_and(|path| path.exists()));
     Ok(())
 }
 

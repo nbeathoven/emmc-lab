@@ -1,7 +1,7 @@
 use crate::diagnostics::{
     run_deep_trace, run_live_sampler, run_live_sampler_until, DiagnosticReport, LiveSamplerState,
 };
-use crate::engine::execute_profile;
+use crate::engine::{execute_profile_with_checkpointing, CheckpointRuntime};
 use crate::filemap;
 use crate::geometry::collect_block_geometry;
 use crate::health::{
@@ -9,24 +9,32 @@ use crate::health::{
     ReadDisturbInput,
 };
 use crate::health_compare::{self, render_health_compare_html};
+use crate::integrity::{
+    capture_region_snapshot, compute_region_checksum, verify_against_baseline, ChecksumAlgorithm,
+};
 use crate::lba_trace::{self, LbaTraceOptions};
 use crate::presets::{
     category_label, preset_categories, presets_in_category, resolve_preset, PresetId,
     PresetTargetScope,
 };
-use crate::profile::{AddressingMode, DurabilityMode, Profile, TargetMode, WorkloadType};
+use crate::profile::{
+    AddressingConfig, AddressingMode, DurabilityMode, IntegrityRegionConfig, Profile,
+    SecondaryTarget, TargetConfig, TargetMode, WorkloadConfig, WorkloadType,
+};
 use crate::report::{export_session, terminal_summary, ExportFormat};
 use crate::storage::{
     delete_session, infer_profile_path, list_profiles, list_sessions, load_session, save_session,
-    SessionRecord,
+    session_dir, SessionRecord,
 };
 use crate::system::{
     assess_raw_target_safety, block_device_size, collect_capabilities, collect_system_snapshot,
-    diskstats_map, doctor, list_devices, logical_block_size, AppPaths, DeviceInfo,
+    detect_cqhci, diskstats_map, doctor, list_devices, logical_block_size, AppPaths, CqhciRisk,
+    DeviceInfo,
 };
 use crate::ui::{
     render_device_geometry, render_device_list, render_doctor_report, render_health_report,
-    render_live_monitor, render_selector_screen, render_settings, SelectorColumn, SelectorRow,
+    render_live_monitor, render_selector_screen, render_settings, render_warning_banner,
+    SelectorColumn, SelectorRow,
 };
 use anyhow::{anyhow, bail, Result};
 use chrono::{Local, Utc};
@@ -291,6 +299,55 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
         "Logical sector/LBA targeting only. The application does not claim fixed physical NAND cell targeting."
             .to_string(),
     );
+    let session_output_dir = session_dir(paths, &session_id);
+    fs::create_dir_all(&session_output_dir)?;
+    for (index, region) in profile
+        .integrity
+        .iter()
+        .filter(|region| region.capture_before_run)
+        .enumerate()
+    {
+        let mut baseline = with_spinner(
+            &format!(
+                "Capturing integrity baseline for {}",
+                operator_target_label(&region.device)
+            ),
+            || {
+                compute_region_checksum(
+                    &region.device,
+                    region.offset_bytes,
+                    region.length_bytes,
+                    region.algorithm.clone(),
+                )
+            },
+        )?;
+        let before_path = session_output_dir.join(format!("integrity-before-{index}.bin"));
+        if capture_region_snapshot(
+            &region.device,
+            region.offset_bytes,
+            region.length_bytes,
+            &before_path,
+        )
+        .is_ok()
+        {
+            baseline.snapshot_path = Some(before_path);
+        }
+        record.integrity_baselines.push(baseline);
+        let _ = save_session(paths, &record)?;
+    }
+    let cqhci = detect_cqhci(&profile.target.path);
+    if cqhci.risk == CqhciRisk::High {
+        println!(
+            "{}",
+            render_warning_banner(
+                "CQHCI Warning",
+                cqhci
+                    .warning
+                    .as_deref()
+                    .unwrap_or("CQHCI appears enabled on a high-risk host/kernel combination."),
+            )
+        );
+    }
 
     if profile.telemetry.health_telemetry {
         let target_label = operator_target_label(&profile.target.path);
@@ -315,7 +372,15 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
     let target_label = operator_target_label(&profile.target.path);
     let (run_summary, intervals) =
         with_spinner(&format!("Running workload on {target_label}"), || {
-            execute_profile(&profile)
+            execute_profile_with_checkpointing(
+                &profile,
+                Some(CheckpointRuntime {
+                    paths: paths.clone(),
+                    session_id: session_id.clone(),
+                    integrity_baselines: record.integrity_baselines.clone(),
+                    notes: record.notes.clone(),
+                }),
+            )
         })?;
     record.run_summary = Some(run_summary);
     record.interval_stats = intervals;
@@ -326,6 +391,38 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
             &format!("Collecting post-run health for {target_label}"),
             || read_emmc_health(&profile.target.path, None, None),
         )?);
+    }
+
+    let baselines_to_verify = record.integrity_baselines.clone();
+    for (index, baseline) in baselines_to_verify.iter().enumerate() {
+        let mut verification = with_spinner(
+            &format!(
+                "Verifying integrity for {}",
+                operator_target_label(&baseline.device)
+            ),
+            || verify_against_baseline(baseline, "post-workload verification"),
+        )?;
+        if !verification.matches {
+            let after_path = session_output_dir.join(format!("integrity-after-{index}.bin"));
+            if capture_region_snapshot(
+                &baseline.device,
+                baseline.region_offset_bytes,
+                baseline.region_length_bytes,
+                &after_path,
+            )
+            .is_ok()
+            {
+                verification.snapshot_path = Some(after_path);
+            }
+            record.notes.push(format!(
+                "CRITICAL: integrity mismatch on {} baseline={} verified={}",
+                baseline.device.display(),
+                baseline.checksum_hex,
+                verification.verified_checksum_hex
+            ));
+        }
+        record.integrity_verifications.push(verification);
+        let _ = save_session(paths, &record)?;
     }
 
     if let Some(handle) = diag_handle {
@@ -357,6 +454,95 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
 
     println!("{}", terminal_summary(&record));
     Ok(session_id)
+}
+
+pub fn run_integrity_capture(
+    paths: &AppPaths,
+    session_id: &str,
+    device: &Path,
+    algorithm: &str,
+) -> Result<()> {
+    let algorithm = parse_checksum_algorithm(algorithm)?;
+    let mut record = load_session(paths, session_id)?;
+    let baseline = with_spinner(
+        &format!(
+            "Capturing integrity baseline for {}",
+            operator_target_label(device)
+        ),
+        || compute_region_checksum(device, 0, 0, algorithm.clone()),
+    )?;
+    println!("{}", baseline.checksum_hex);
+    record.integrity_baselines.push(baseline);
+    let path = save_session(paths, &record)?;
+    println!("Saved session: {}", path.display());
+    Ok(())
+}
+
+pub fn run_integrity_verify(
+    paths: &AppPaths,
+    session_id: &str,
+    device: &Path,
+    note: &str,
+) -> Result<()> {
+    let mut record = load_session(paths, session_id)?;
+    let baseline = record
+        .integrity_baselines
+        .iter()
+        .rev()
+        .find(|baseline| baseline.device == device)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no integrity baseline found for {}", device.display()))?;
+    let verification = with_spinner(
+        &format!("Verifying integrity for {}", operator_target_label(device)),
+        || verify_against_baseline(&baseline, note),
+    )?;
+    println!(
+        "{} {}",
+        if verification.matches { "PASS" } else { "FAIL" },
+        verification.verified_checksum_hex
+    );
+    record.integrity_verifications.push(verification);
+    let path = save_session(paths, &record)?;
+    println!("Saved session: {}", path.display());
+    Ok(())
+}
+
+pub fn run_integrity_history(paths: &AppPaths, session_id: &str) -> Result<()> {
+    let record = load_session(paths, session_id)?;
+    println!("Integrity Baselines:");
+    println!(
+        "{:<24} {:<12} {:>12} {:>12} {:<8}  Checksum",
+        "Captured At", "Device", "Offset", "Length", "Algo"
+    );
+    for baseline in &record.integrity_baselines {
+        println!(
+            "{:<24} {:<12} {:>12} {:>12} {:<8}  {}",
+            baseline.captured_at.to_rfc3339(),
+            baseline.device.display(),
+            baseline.region_offset_bytes,
+            baseline.region_size_actual,
+            format_checksum_algorithm(&baseline.algorithm),
+            baseline.checksum_hex
+        );
+    }
+    println!();
+    println!("Integrity Verifications:");
+    println!(
+        "{:<24} {:<12} {:<6} {:<24}  Checksum / Note",
+        "Verified At", "Device", "Match", "Baseline Captured"
+    );
+    for verification in &record.integrity_verifications {
+        println!(
+            "{:<24} {:<12} {:<6} {:<24}  {} | {}",
+            verification.verified_at.to_rfc3339(),
+            verification.baseline.device.display(),
+            if verification.matches { "PASS" } else { "FAIL" },
+            verification.baseline.captured_at.to_rfc3339(),
+            verification.verified_checksum_hex,
+            verification.note
+        );
+    }
+    Ok(())
 }
 
 pub fn run_profile_path(
@@ -1329,6 +1515,14 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
             continue;
         };
         let preset = presets[preset_choice];
+        if preset.id == PresetId::ConcurrentPartitionStress {
+            let Some(profile) = concurrent_partition_stress_flow()? else {
+                continue;
+            };
+            run_profile_session_interactive(paths, profile.clone())?;
+            *last_profile = Some(profile);
+            continue;
+        }
         let mut device = None::<DeviceInfo>;
         let mut sector = None::<u64>;
         match preset.target_scope {
@@ -1475,6 +1669,497 @@ fn quick_presets_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> R
             _ => {}
         }
     }
+}
+
+fn concurrent_partition_stress_flow() -> Result<Option<Profile>> {
+    let devices = list_devices()?;
+    let parents = devices
+        .iter()
+        .filter(|device| {
+            !device.is_partition
+                && device.name.starts_with("mmcblk")
+                && !device.name.contains("boot")
+                && !device.name.contains("rpmb")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if parents.is_empty() {
+        println!("No parent eMMC device was detected.");
+        return Ok(None);
+    }
+    let parent_items = parents
+        .iter()
+        .map(|device| MenuItem {
+            columns: vec![
+                device.name.clone(),
+                device
+                    .size_bytes
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "-".to_string()),
+                "main eMMC".to_string(),
+            ],
+            detail: device_selection_label(device),
+        })
+        .collect::<Vec<_>>();
+    let Some(parent_choice) = select_from_menu(
+        "CONCURRENT PARTITION STRESS",
+        "Run Workload > Quick Presets > Concurrent Partition Stress > Device",
+        vec![("Step".to_string(), "1 of 4".to_string())],
+        &[
+            SelectorColumn {
+                header: "Device",
+                min: 12,
+                max: 18,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Size",
+                min: 12,
+                max: 18,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Role",
+                min: 12,
+                max: 16,
+                align_right: false,
+            },
+        ],
+        &parent_items,
+        0,
+    )?
+    else {
+        return Ok(None);
+    };
+    let parent = &parents[parent_choice];
+
+    let boot_devices = devices
+        .iter()
+        .filter(|device| {
+            device.name == format!("{}boot0", parent.name)
+                || device.name == format!("{}boot1", parent.name)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if boot_devices.is_empty() {
+        println!("No boot partitions found for {}.", parent.name);
+        return Ok(None);
+    }
+    let boot_items = boot_devices
+        .iter()
+        .map(|device| MenuItem {
+            columns: vec![
+                device.name.clone(),
+                device
+                    .size_bytes
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "-".to_string()),
+                "read source".to_string(),
+            ],
+            detail: "Boot partition reads are non-destructive and will be checksummed before and after the write stress.".to_string(),
+        })
+        .collect::<Vec<_>>();
+    let Some(boot_choice) = select_from_menu(
+        "CONCURRENT PARTITION STRESS",
+        "Run Workload > Quick Presets > Concurrent Partition Stress > Read Device",
+        vec![("Step".to_string(), "2 of 4".to_string())],
+        &[
+            SelectorColumn {
+                header: "Boot",
+                min: 12,
+                max: 18,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Size",
+                min: 12,
+                max: 18,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Role",
+                min: 12,
+                max: 16,
+                align_right: false,
+            },
+        ],
+        &boot_items,
+        0,
+    )?
+    else {
+        return Ok(None);
+    };
+    let boot = &boot_devices[boot_choice];
+    let sector_size = boot.logical_block_size.unwrap_or(512).max(512);
+    let boot_size = boot.size_bytes.unwrap_or(0);
+    let boot_sectors = boot_size.saturating_div(sector_size).max(1);
+    let (read_start_sector, read_sector_count) =
+        choose_concurrent_read_region(boot, sector_size, boot_sectors)?;
+    if read_sector_count == 0 {
+        return Ok(None);
+    }
+
+    let write_candidates = devices
+        .iter()
+        .filter(|device| {
+            device.is_partition
+                && device.parent.as_deref() == Some(parent.name.as_str())
+                && !device.mounted
+                && !device.is_root_device
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if write_candidates.is_empty() {
+        println!(
+            "No unmounted, non-root writable partitions were detected for {}.",
+            parent.name
+        );
+        return Ok(None);
+    }
+    let write_items = write_candidates
+        .iter()
+        .map(|device| MenuItem {
+            columns: vec![
+                device.path.display().to_string(),
+                device
+                    .size_bytes
+                    .map(format_bytes)
+                    .unwrap_or_else(|| "-".to_string()),
+                "write target".to_string(),
+            ],
+            detail: device_selection_label(device),
+        })
+        .collect::<Vec<_>>();
+    let Some(write_choice) = select_from_menu(
+        "CONCURRENT PARTITION STRESS",
+        "Run Workload > Quick Presets > Concurrent Partition Stress > Write Target",
+        vec![("Step".to_string(), "3 of 4".to_string())],
+        &[
+            SelectorColumn {
+                header: "Partition",
+                min: 18,
+                max: 30,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Size",
+                min: 12,
+                max: 18,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Role",
+                min: 12,
+                max: 16,
+                align_right: false,
+            },
+        ],
+        &write_items,
+        0,
+    )?
+    else {
+        return Ok(None);
+    };
+    let write_target = &write_candidates[write_choice];
+
+    let write_kib = match prompt_u64_in_range(
+        "Write file size KiB",
+        200,
+        1,
+        1024 * 1024,
+        Some("This becomes the write I/O size for each iteration. Default 200 KiB."),
+    )? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(None),
+    };
+    let iterations = match prompt_u64_in_range(
+        "Iterations",
+        1000,
+        1,
+        100_000_000,
+        Some("Number of write operations to issue while the boot partition is read in parallel."),
+    )? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(None),
+    };
+    let cap_mib = match prompt_u64_in_range(
+        "Data cap MiB",
+        1024,
+        1,
+        1024 * 1024,
+        Some("Maximum logical write range to cycle through on the selected write partition."),
+    )? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => return Ok(None),
+    };
+    let write_block_bytes = write_kib.saturating_mul(1024);
+    let cap_bytes = cap_mib.saturating_mul(1024 * 1024);
+    let write_range_bytes = write_target
+        .size_bytes
+        .map(|size| size.min(cap_bytes))
+        .unwrap_or(cap_bytes)
+        .max(write_block_bytes);
+    let estimated_write_bytes = write_block_bytes.saturating_mul(iterations);
+    let read_len_bytes = read_sector_count.saturating_mul(sector_size);
+    let cid_status = read_emmc_health(&parent.path, None, None)
+        .ok()
+        .and_then(|health| health.cid)
+        .map(|cid| format!("captured: {} {}", cid.manufacturer_id_hex(), cid.pnm))
+        .unwrap_or_else(|| "unavailable before run; will retry in health snapshot".to_string());
+
+    println!("Concurrent Partition Stress Summary");
+    println!(
+        "READ  : {} sectors {}-{} ({})",
+        boot.path.display(),
+        read_start_sector,
+        read_start_sector
+            .saturating_add(read_sector_count)
+            .saturating_sub(1),
+        format_bytes(read_len_bytes)
+    );
+    println!(
+        "WRITE : {} block={} iterations={} cap={} estimated={}",
+        write_target.path.display(),
+        format_bytes(write_block_bytes),
+        iterations,
+        format_bytes(write_range_bytes),
+        format_bytes(estimated_write_bytes)
+    );
+    println!("CID   : {cid_status}");
+    println!("Verify: boot-sector md5 before/after");
+    let proceed = match prompt_bool_default(
+        "Proceed?",
+        true,
+        Some("This writes destructively to the selected write partition. The boot partition is read-only for this preset."),
+    )? {
+        WizardInput::Value(value) => value,
+        WizardInput::Back | WizardInput::Cancel => false,
+    };
+    if !proceed {
+        return Ok(None);
+    }
+
+    Ok(Some(build_concurrent_partition_stress_profile(
+        parent,
+        boot,
+        write_target,
+        read_start_sector,
+        read_sector_count,
+        sector_size,
+        write_block_bytes as usize,
+        iterations,
+        write_range_bytes,
+    )))
+}
+
+fn choose_concurrent_read_region(
+    boot: &DeviceInfo,
+    sector_size: u64,
+    boot_sectors: u64,
+) -> Result<(u64, u64)> {
+    let max_sector = boot_sectors.saturating_sub(1);
+    let half = boot_sectors / 2;
+    let items = vec![
+        MenuItem {
+            columns: vec![
+                "Entire boot partition".to_string(),
+                format!("0-{max_sector}"),
+                format_bytes(boot_sectors.saturating_mul(sector_size)),
+            ],
+            detail: "Read and verify the whole selected boot partition.".to_string(),
+        },
+        MenuItem {
+            columns: vec![
+                "First half of boot".to_string(),
+                format!("0-{}", half.saturating_sub(1)),
+                format_bytes(half.saturating_mul(sector_size)),
+            ],
+            detail: "Read and verify the first half of the boot partition.".to_string(),
+        },
+        MenuItem {
+            columns: vec![
+                "Second half of boot".to_string(),
+                format!("{half}-{max_sector}"),
+                format_bytes(boot_sectors.saturating_sub(half).saturating_mul(sector_size)),
+            ],
+            detail: "Read and verify the second half of the boot partition.".to_string(),
+        },
+        MenuItem {
+            columns: vec![
+                "Custom range...".to_string(),
+                format!("0-{max_sector}"),
+                "operator input".to_string(),
+            ],
+            detail: "Enter inclusive start and end sectors. Each sector is 512 bytes unless the device reports a different logical sector size.".to_string(),
+        },
+    ];
+    let Some(choice) = select_from_menu(
+        "CONCURRENT PARTITION STRESS",
+        "Run Workload > Quick Presets > Concurrent Partition Stress > Read Region",
+        vec![
+            ("Boot".to_string(), boot.path.display().to_string()),
+            ("Sector Size".to_string(), format!("{sector_size} bytes")),
+            ("Total Sectors".to_string(), boot_sectors.to_string()),
+        ],
+        &[
+            SelectorColumn {
+                header: "Region",
+                min: 20,
+                max: 28,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Sectors",
+                min: 14,
+                max: 22,
+                align_right: false,
+            },
+            SelectorColumn {
+                header: "Size",
+                min: 12,
+                max: 18,
+                align_right: false,
+            },
+        ],
+        &items,
+        0,
+    )?
+    else {
+        return Ok((0, 0));
+    };
+    let range = match choice {
+        0 => (0, boot_sectors),
+        1 => (0, half.max(1)),
+        2 => (half, boot_sectors.saturating_sub(half).max(1)),
+        _ => {
+            let start = match prompt_u64_in_range(
+                "Enter start sector",
+                0,
+                0,
+                max_sector,
+                Some("Inclusive sector number within the selected boot partition."),
+            )? {
+                WizardInput::Value(value) => value,
+                WizardInput::Back | WizardInput::Cancel => return Ok((0, 0)),
+            };
+            let end = match prompt_u64_in_range(
+                "Enter end sector",
+                max_sector,
+                start,
+                max_sector,
+                Some("Inclusive end sector. The selected range is start through end."),
+            )? {
+                WizardInput::Value(value) => value,
+                WizardInput::Back | WizardInput::Cancel => return Ok((0, 0)),
+            };
+            (start, end.saturating_sub(start).saturating_add(1))
+        }
+    };
+    println!(
+        "Selected: sectors {}-{} ({}, {} sectors)",
+        range.0,
+        range.0.saturating_add(range.1).saturating_sub(1),
+        format_bytes(range.1.saturating_mul(sector_size)),
+        range.1
+    );
+    Ok(range)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_concurrent_partition_stress_profile(
+    parent: &DeviceInfo,
+    boot: &DeviceInfo,
+    write_target: &DeviceInfo,
+    read_start_sector: u64,
+    read_sector_count: u64,
+    sector_size: u64,
+    write_block_bytes: usize,
+    iterations: u64,
+    write_range_bytes: u64,
+) -> Profile {
+    let mut profile = Profile::default_named("concurrent-partition-stress");
+    profile.description = Some(
+        "Read selected boot-partition sectors while writing a user partition, then compare boot-sector md5 before and after.".to_string(),
+    );
+    profile.target = TargetConfig {
+        mode: TargetMode::RawDevice,
+        path: write_target.path.clone(),
+        create_if_missing_size_bytes: None,
+    };
+    profile.workload = WorkloadConfig {
+        test_type: WorkloadType::Write,
+        block_size_bytes: write_block_bytes,
+        runtime_seconds: None,
+        exact_op_count: Some(iterations),
+        queue_depth: 1,
+        worker_count: 1,
+        read_percentage: 0,
+        random_seed: 1,
+        direct_io: true,
+        verify: false,
+        sync_cadence_writes: Some(1024),
+        sync_cadence_ms: Some(1000),
+        report_interval_ms: 1000,
+    };
+    profile.addressing = AddressingConfig {
+        mode: AddressingMode::ByteRange,
+        start_sector: None,
+        sector_count: None,
+        start_offset_bytes: Some(0),
+        range_size_bytes: Some(write_range_bytes),
+    };
+    profile.secondary_targets = vec![SecondaryTarget {
+        target: TargetConfig {
+            mode: TargetMode::RawDevice,
+            path: boot.path.clone(),
+            create_if_missing_size_bytes: None,
+        },
+        workload: WorkloadConfig {
+            test_type: WorkloadType::Read,
+            block_size_bytes: sector_size as usize,
+            runtime_seconds: None,
+            exact_op_count: None,
+            queue_depth: 1,
+            worker_count: 1,
+            read_percentage: 100,
+            random_seed: 1,
+            direct_io: true,
+            verify: false,
+            sync_cadence_writes: None,
+            sync_cadence_ms: None,
+            report_interval_ms: 1000,
+        },
+        addressing: AddressingConfig {
+            mode: AddressingMode::SectorRange,
+            start_sector: Some(read_start_sector),
+            sector_count: Some(read_sector_count),
+            start_offset_bytes: None,
+            range_size_bytes: None,
+        },
+        worker_count: 1,
+    }];
+    profile.integrity = vec![IntegrityRegionConfig {
+        device: boot.path.clone(),
+        offset_bytes: read_start_sector.saturating_mul(sector_size),
+        length_bytes: read_sector_count.saturating_mul(sector_size),
+        algorithm: ChecksumAlgorithm::Md5,
+        capture_before_run: true,
+    }];
+    profile.durability.mode = DurabilityMode::BatchDurable;
+    profile.telemetry.health_telemetry = true;
+    profile.reporting.notes.push(format!(
+        "Concurrent partition stress: parent={} read={} sectors {}-{} write={}",
+        parent.path.display(),
+        boot.path.display(),
+        read_start_sector,
+        read_start_sector
+            .saturating_add(read_sector_count)
+            .saturating_sub(1),
+        write_target.path.display()
+    ));
+    profile.safety.confirmation_flag = true;
+    profile.safety.destructive_confirmation_required = true;
+    profile
 }
 
 fn run_saved_profile_flow(paths: &AppPaths, last_profile: &mut Option<Profile>) -> Result<()> {
@@ -2056,6 +2741,23 @@ fn session_id() -> String {
         Utc::now().format("%Y%m%dT%H%M%S"),
         Uuid::new_v4().simple()
     )
+}
+
+fn parse_checksum_algorithm(value: &str) -> Result<ChecksumAlgorithm> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "crc32" => Ok(ChecksumAlgorithm::Crc32),
+        "md5" => Ok(ChecksumAlgorithm::Md5),
+        "sha256" => Ok(ChecksumAlgorithm::Sha256),
+        _ => bail!("unsupported checksum algorithm: {value}"),
+    }
+}
+
+fn format_checksum_algorithm(algorithm: &ChecksumAlgorithm) -> &'static str {
+    match algorithm {
+        ChecksumAlgorithm::Crc32 => "crc32",
+        ChecksumAlgorithm::Md5 => "md5",
+        ChecksumAlgorithm::Sha256 => "sha256",
+    }
 }
 
 fn prompt_string_default(label: &str, default: Option<&str>) -> Result<WizardInput<String>> {
@@ -3495,11 +4197,13 @@ fn parse_escape_sequence() -> Result<MenuKey> {
 #[cfg(test)]
 mod tests {
     use super::{
-        adjusted_block_size, block_size_floor, device_rank, format_bytes, format_grouped_u64,
-        is_auxiliary_device, is_single_sector_target, normalize_block_size,
-        normalize_file_target_path, parse_yes_no, PromptBuffer,
+        adjusted_block_size, block_size_floor, build_concurrent_partition_stress_profile,
+        device_rank, format_bytes, format_grouped_u64, is_auxiliary_device,
+        is_single_sector_target, normalize_block_size, normalize_file_target_path, parse_yes_no,
+        PromptBuffer,
     };
-    use crate::profile::{AddressingMode, Profile, TargetMode};
+    use crate::integrity::ChecksumAlgorithm;
+    use crate::profile::{AddressingMode, Profile, TargetMode, WorkloadType};
     use crate::system::DeviceInfo;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -3571,6 +4275,66 @@ mod tests {
         assert_eq!(format_grouped_u64(2048), "2,048");
         assert_eq!(format_bytes(2 * 1024 * 1024), "2.0 MiB [2,048 KiB]");
         assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB [1,024 MiB]");
+    }
+
+    #[test]
+    fn concurrent_partition_stress_profile_wires_read_write_and_md5() {
+        let parent = DeviceInfo {
+            name: "mmcblk2".to_string(),
+            path: PathBuf::from("/dev/mmcblk2"),
+            size_bytes: Some(16 * 1024 * 1024 * 1024),
+            logical_block_size: Some(512),
+            ..DeviceInfo::default()
+        };
+        let boot = DeviceInfo {
+            name: "mmcblk2boot0".to_string(),
+            path: PathBuf::from("/dev/mmcblk2boot0"),
+            size_bytes: Some(4 * 1024 * 1024),
+            logical_block_size: Some(512),
+            ..DeviceInfo::default()
+        };
+        let write_target = DeviceInfo {
+            name: "mmcblk2p1".to_string(),
+            path: PathBuf::from("/dev/mmcblk2p1"),
+            parent: Some("mmcblk2".to_string()),
+            is_partition: true,
+            size_bytes: Some(2 * 1024 * 1024 * 1024),
+            logical_block_size: Some(512),
+            ..DeviceInfo::default()
+        };
+        let profile = build_concurrent_partition_stress_profile(
+            &parent,
+            &boot,
+            &write_target,
+            128,
+            256,
+            512,
+            200 * 1024,
+            1000,
+            1024 * 1024 * 1024,
+        );
+        assert_eq!(profile.target.path, PathBuf::from("/dev/mmcblk2p1"));
+        assert_eq!(profile.workload.test_type, WorkloadType::Write);
+        assert_eq!(profile.workload.block_size_bytes, 200 * 1024);
+        assert_eq!(profile.workload.exact_op_count, Some(1000));
+        assert_eq!(profile.secondary_targets.len(), 1);
+        assert_eq!(
+            profile.secondary_targets[0].target.path,
+            PathBuf::from("/dev/mmcblk2boot0")
+        );
+        assert_eq!(
+            profile.secondary_targets[0].addressing.start_sector,
+            Some(128)
+        );
+        assert_eq!(
+            profile.secondary_targets[0].addressing.sector_count,
+            Some(256)
+        );
+        assert_eq!(profile.integrity.len(), 1);
+        assert_eq!(profile.integrity[0].algorithm, ChecksumAlgorithm::Md5);
+        assert_eq!(profile.integrity[0].offset_bytes, 128 * 512);
+        assert_eq!(profile.integrity[0].length_bytes, 256 * 512);
+        assert!(profile.safety.confirmation_flag);
     }
 
     #[test]

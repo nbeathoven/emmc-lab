@@ -1,6 +1,7 @@
 use crate::diagnostics::DiagnosticReport;
 use crate::engine::{IntervalStats, RunSummary};
 use crate::health::EmmcHealthSnapshot;
+use crate::integrity::{IntegrityBaseline, IntegrityVerification};
 use crate::profile::Profile;
 use crate::system::{collect_system_snapshot, AppPaths, SystemSnapshot};
 use anyhow::{Context, Result};
@@ -15,6 +16,10 @@ pub struct SessionRecord {
     pub created_at: DateTime<Utc>,
     pub system: SystemSnapshot,
     pub profile: Option<Profile>,
+    #[serde(default)]
+    pub integrity_baselines: Vec<IntegrityBaseline>,
+    #[serde(default)]
+    pub integrity_verifications: Vec<IntegrityVerification>,
     pub run_summary: Option<RunSummary>,
     pub interval_stats: Vec<IntervalStats>,
     pub health_before: Option<EmmcHealthSnapshot>,
@@ -24,6 +29,17 @@ pub struct SessionRecord {
     pub contamination_note: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TestCheckpoint {
+    pub session_id: String,
+    pub iteration: u64,
+    pub elapsed_secs: u64,
+    pub integrity_baselines: Vec<IntegrityBaseline>,
+    pub interval_stats: Vec<IntervalStats>,
+    pub notes: Vec<String>,
+    pub saved_at: DateTime<Utc>,
+}
+
 impl SessionRecord {
     pub fn new(session_id: String) -> Self {
         Self {
@@ -31,6 +47,8 @@ impl SessionRecord {
             created_at: Utc::now(),
             system: collect_system_snapshot(),
             profile: None,
+            integrity_baselines: Vec::new(),
+            integrity_verifications: Vec::new(),
             run_summary: None,
             interval_stats: Vec::new(),
             health_before: None,
@@ -71,6 +89,24 @@ pub fn save_session(paths: &AppPaths, record: &SessionRecord) -> Result<PathBuf>
     Ok(summary_path)
 }
 
+pub fn save_checkpoint(paths: &AppPaths, cp: &TestCheckpoint) -> Result<PathBuf> {
+    let dir = session_dir(paths, &cp.session_id);
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    let tmp_path = dir.join("checkpoint.json.tmp");
+    let final_path = dir.join("checkpoint.json");
+    let body = serde_json::to_string_pretty(cp)?;
+    fs::write(&tmp_path, body)
+        .with_context(|| format!("failed to write {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, &final_path).with_context(|| {
+        format!(
+            "failed to rename {} to {}",
+            tmp_path.display(),
+            final_path.display()
+        )
+    })?;
+    Ok(final_path)
+}
+
 pub fn load_session(paths: &AppPaths, session_id: &str) -> Result<SessionRecord> {
     let path = session_dir(paths, session_id).join("session.json");
     let text =
@@ -78,6 +114,18 @@ pub fn load_session(paths: &AppPaths, session_id: &str) -> Result<SessionRecord>
     let record = serde_json::from_str(&text)
         .with_context(|| format!("failed to parse {}", path.display()))?;
     Ok(record)
+}
+
+pub fn load_checkpoint(paths: &AppPaths, session_id: &str) -> Result<Option<TestCheckpoint>> {
+    let path = session_dir(paths, session_id).join("checkpoint.json");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
+    let checkpoint = serde_json::from_str(&text)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(Some(checkpoint))
 }
 
 pub fn load_session_with_intervals(paths: &AppPaths, session_id: &str) -> Result<SessionRecord> {

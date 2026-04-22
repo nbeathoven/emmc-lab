@@ -220,6 +220,104 @@ fn export_csv(paths: &AppPaths, record: &SessionRecord) -> Result<Vec<PathBuf>> 
         }
     }
 
+    if record.health_before.is_some() || record.health_after.is_some() {
+        let health_path = paths
+            .exports_dir
+            .join(format!("{}_health.csv", record.session_id));
+        let mut health_csv = String::from("phase,available,manufacturer_id,product_name,serial_number,manufactured,pre_eol_info,life_time_a,life_time_b,bkops_status,ext_csd_source\n");
+        for (phase, snapshot) in [
+            ("before", record.health_before.as_ref()),
+            ("after", record.health_after.as_ref()),
+        ] {
+            if let Some(snapshot) = snapshot {
+                let cid = snapshot.cid.as_ref();
+                health_csv.push_str(&format!(
+                    "{},{},{},{},{},{},{},{},{},{},{}\n",
+                    phase,
+                    snapshot.available,
+                    cid.map(|c| c.manufacturer_id_hex()).unwrap_or_default(),
+                    csv_escape(cid.map(|c| c.pnm.as_str()).unwrap_or_default()),
+                    csv_escape(cid.map(|c| c.psn.as_str()).unwrap_or_default()),
+                    csv_escape(cid.map(|c| c.mdt.as_str()).unwrap_or_default()),
+                    csv_escape(snapshot.pre_eol_info.as_deref().unwrap_or_default()),
+                    csv_escape(
+                        snapshot
+                            .device_life_time_est_typ_a
+                            .as_deref()
+                            .unwrap_or_default()
+                    ),
+                    csv_escape(
+                        snapshot
+                            .device_life_time_est_typ_b
+                            .as_deref()
+                            .unwrap_or_default()
+                    ),
+                    snapshot
+                        .bkops_status
+                        .map(|value| format!("0x{value:02x}"))
+                        .unwrap_or_default(),
+                    csv_escape(snapshot.ext_csd_source.as_deref().unwrap_or_default()),
+                ));
+            }
+        }
+        fs::write(&health_path, health_csv)?;
+        paths_out.push(health_path);
+    }
+
+    if !record.integrity_baselines.is_empty() || !record.integrity_verifications.is_empty() {
+        let integrity_path = paths
+            .exports_dir
+            .join(format!("{}_integrity.csv", record.session_id));
+        let mut integrity_csv = String::from("kind,device,offset_bytes,length_bytes,algorithm,baseline_checksum,verified_checksum,matches,baseline_snapshot,verified_snapshot,note\n");
+        for baseline in &record.integrity_baselines {
+            integrity_csv.push_str(&format!(
+                "baseline,{},{},{},{:?},{},,,{},,,\n",
+                csv_escape(&baseline.device.display().to_string()),
+                baseline.region_offset_bytes,
+                baseline.region_size_actual,
+                baseline.algorithm,
+                baseline.checksum_hex,
+                csv_escape(
+                    &baseline
+                        .snapshot_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                ),
+            ));
+        }
+        for verification in &record.integrity_verifications {
+            integrity_csv.push_str(&format!(
+                "verification,{},{},{},{:?},{},{},{},{},{},{}\n",
+                csv_escape(&verification.baseline.device.display().to_string()),
+                verification.baseline.region_offset_bytes,
+                verification.baseline.region_size_actual,
+                verification.baseline.algorithm,
+                verification.baseline.checksum_hex,
+                verification.verified_checksum_hex,
+                verification.matches,
+                csv_escape(
+                    &verification
+                        .baseline
+                        .snapshot_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                ),
+                csv_escape(
+                    &verification
+                        .snapshot_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default()
+                ),
+                csv_escape(&verification.note),
+            ));
+        }
+        fs::write(&integrity_path, integrity_csv)?;
+        paths_out.push(integrity_path);
+    }
+
     Ok(paths_out)
 }
 
@@ -357,6 +455,58 @@ fn render_html(record: &SessionRecord) -> String {
                 after.pre_eol_info,
                 after.device_life_time_est_typ_a,
                 after.device_life_time_est_typ_b
+            ));
+        }
+        html.push_str("</table>");
+        if let Some(cid) = before.cid.as_ref().or_else(|| {
+            record
+                .health_after
+                .as_ref()
+                .and_then(|after| after.cid.as_ref())
+        }) {
+            html.push_str("<h2>Device Identity</h2><table>");
+            html.push_str(&format!(
+                "<tr><th>Manufacturer ID</th><td>{}</td></tr>",
+                cid.manufacturer_id_hex()
+            ));
+            html.push_str(&format!(
+                "<tr><th>Product Name</th><td>{}</td></tr>",
+                escape_html(&cid.pnm)
+            ));
+            html.push_str(&format!(
+                "<tr><th>Serial Number</th><td>{}</td></tr>",
+                escape_html(&cid.psn)
+            ));
+            html.push_str(&format!(
+                "<tr><th>Manufactured</th><td>{}</td></tr>",
+                escape_html(&cid.mdt)
+            ));
+            html.push_str("</table>");
+        }
+    }
+
+    if !record.integrity_baselines.is_empty() || !record.integrity_verifications.is_empty() {
+        html.push_str("<h2>U-Boot Sector Verification</h2><table>");
+        html.push_str("<tr><th>Kind</th><th>Device</th><th>Offset</th><th>Length</th><th>Checksum</th><th>Result</th><th>Snapshot</th></tr>");
+        for baseline in &record.integrity_baselines {
+            html.push_str(&format!(
+                "<tr><td>Baseline</td><td><code>{}</code></td><td>{}</td><td>{}</td><td><code>{}</code></td><td>-</td><td>{}</td></tr>",
+                escape_html(&baseline.device.display().to_string()),
+                baseline.region_offset_bytes,
+                baseline.region_size_actual,
+                escape_html(&baseline.checksum_hex),
+                escape_html(&baseline.snapshot_path.as_ref().map(|path| path.display().to_string()).unwrap_or_default())
+            ));
+        }
+        for verification in &record.integrity_verifications {
+            html.push_str(&format!(
+                "<tr><td>Verification</td><td><code>{}</code></td><td>{}</td><td>{}</td><td><code>{}</code></td><td>{}</td><td>{}</td></tr>",
+                escape_html(&verification.baseline.device.display().to_string()),
+                verification.baseline.region_offset_bytes,
+                verification.baseline.region_size_actual,
+                escape_html(&verification.verified_checksum_hex),
+                if verification.matches { "PASS" } else { "FAIL" },
+                escape_html(&verification.snapshot_path.as_ref().map(|path| path.display().to_string()).unwrap_or_default())
             ));
         }
         html.push_str("</table>");

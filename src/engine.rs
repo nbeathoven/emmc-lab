@@ -1,6 +1,9 @@
+use crate::boot_partition::{is_boot_partition, BootPartitionGuard};
+use crate::integrity::IntegrityBaseline;
 use crate::profile::{
     DurabilityMode, Profile, ResolvedRange, StopCondition, TargetMode, WorkloadType,
 };
+use crate::storage::{save_checkpoint, TestCheckpoint};
 use crate::system::{block_device_size, io_uring_available, logical_block_size};
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::{DateTime, Utc};
@@ -82,6 +85,24 @@ pub struct RunSummary {
     pub addressed_range_start_bytes: u64,
     pub addressed_range_length_bytes: u64,
     pub logical_sector_size: u64,
+    #[serde(default)]
+    pub secondary_summaries: Vec<SecondaryRunSummary>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecondaryRunSummary {
+    pub target: PathBuf,
+    pub ops_completed: u64,
+    pub bytes_completed: u64,
+    pub errors: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckpointRuntime {
+    pub paths: crate::system::AppPaths,
+    pub session_id: String,
+    pub integrity_baselines: Vec<IntegrityBaseline>,
     pub notes: Vec<String>,
 }
 
@@ -122,6 +143,25 @@ struct LocalStats {
     verify: VerifyResults,
 }
 
+struct OpenTarget {
+    fd: RawFd,
+    _boot_guard: Option<BootPartitionGuard>,
+}
+
+struct SecondaryExecutionPlan {
+    profile: Profile,
+    range: ResolvedRange,
+    target: OpenTarget,
+}
+
+struct SecondaryRuntime {
+    target_path: PathBuf,
+    counters: Arc<GlobalCounters>,
+    joins: Vec<thread::JoinHandle<()>>,
+    rx: mpsc::Receiver<Result<LocalStats, String>>,
+    _target: OpenTarget,
+}
+
 #[derive(Debug)]
 struct LatencyHistogram {
     counts: [u64; 64],
@@ -138,6 +178,13 @@ impl Default for LatencyHistogram {
 }
 
 pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalStats>)> {
+    execute_profile_with_checkpointing(profile, None)
+}
+
+pub fn execute_profile_with_checkpointing(
+    profile: &Profile,
+    checkpoint_runtime: Option<CheckpointRuntime>,
+) -> Result<(RunSummary, Vec<IntervalStats>)> {
     profile.validate()?;
     let started_at = Utc::now();
     let target_len = prepare_target(profile)?;
@@ -145,6 +192,7 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
     let resolved_range = profile.resolved_range(target_len, logical_sector_size)?;
     validate_alignment(profile, &resolved_range)?;
     let backend = choose_backend();
+    let secondary_plans = prepare_secondary_plans(profile)?;
 
     let counters = Arc::new(GlobalCounters::default());
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -154,15 +202,31 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
     let report_interval = Duration::from_millis(profile.workload.report_interval_ms.max(100));
     let interval_counters = Arc::clone(&counters);
     let interval_stop = Arc::clone(&stop_flag);
+    let checkpoint_config = profile.checkpointing.clone();
+    let checkpoint_runtime = checkpoint_runtime
+        .filter(|_| profile.checkpointing.enabled && profile.checkpointing.every_n_iterations > 0);
+    let (checkpoint_tx, checkpoint_rx) = mpsc::channel::<TestCheckpoint>();
+    let sampler_checkpoint_tx = checkpoint_tx.clone();
+    let checkpoint_writer = checkpoint_runtime.clone().map(|runtime| {
+        thread::spawn(move || {
+            for checkpoint in checkpoint_rx {
+                let _ = save_checkpoint(&runtime.paths, &checkpoint);
+            }
+        })
+    });
 
+    // Sample the shared counters on a fixed cadence so the saved session can show
+    // interval deltas even when the workload itself is using exact op counts.
     let sampler = thread::spawn(move || {
         let started = Instant::now();
         let mut prev = snapshot_counters(&interval_counters);
+        let mut accumulated = Vec::new();
+        let mut last_checkpoint_multiple = 0_u64;
         while !interval_stop.load(Ordering::Relaxed) {
             thread::sleep(report_interval);
             let current = snapshot_counters(&interval_counters);
             let second = started.elapsed().as_secs();
-            let _ = interval_tx.send(IntervalStats {
+            let interval = IntervalStats {
                 second,
                 read_ios_completed: current
                     .read_ios_completed
@@ -183,7 +247,30 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
                 retries: current.retries.saturating_sub(prev.retries),
                 verify_failures: current.verify_failures.saturating_sub(prev.verify_failures),
                 sync_failures: current.sync_failures.saturating_sub(prev.sync_failures),
-            });
+            };
+            let _ = interval_tx.send(interval.clone());
+            accumulated.push(interval);
+            if let Some(runtime) = &checkpoint_runtime {
+                let total_ops = current
+                    .read_ios_completed
+                    .saturating_add(current.write_ios_completed);
+                let every = checkpoint_config.every_n_iterations;
+                if every > 0 {
+                    let completed_multiple = total_ops / every;
+                    if total_ops > 0 && completed_multiple > last_checkpoint_multiple {
+                        let _ = sampler_checkpoint_tx.send(TestCheckpoint {
+                            session_id: runtime.session_id.clone(),
+                            iteration: total_ops,
+                            elapsed_secs: second,
+                            integrity_baselines: runtime.integrity_baselines.clone(),
+                            interval_stats: accumulated.clone(),
+                            notes: runtime.notes.clone(),
+                            saved_at: Utc::now(),
+                        });
+                        last_checkpoint_multiple = completed_multiple;
+                    }
+                }
+            }
             prev = current;
         }
     });
@@ -201,6 +288,8 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
         joins.push(thread::spawn(move || {
             let stats = worker_loop(worker_id, &profile, range, counters, stop, next_op, started);
             if stats.is_err() {
+                // Stop sibling workers as soon as one worker fails so we do not produce
+                // a zero-I/O-looking summary from defaulted worker stats.
                 failure_stop.store(true, Ordering::Relaxed);
             }
             let _ = worker_tx.send(stats.map_err(|err| format!("{err:#}")));
@@ -208,7 +297,43 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
     }
     drop(worker_tx);
 
+    let mut secondary_runtimes = Vec::new();
+    for plan in secondary_plans {
+        let counters = Arc::new(GlobalCounters::default());
+        let next_op = Arc::new(AtomicU64::new(0));
+        let (secondary_tx, secondary_rx) = mpsc::channel::<Result<LocalStats, String>>();
+        let mut secondary_joins = Vec::new();
+        for worker_id in 0..plan.profile.workload.worker_count {
+            let profile = plan.profile.clone();
+            let counters = Arc::clone(&counters);
+            let stop = Arc::clone(&stop_flag);
+            let failure_stop = Arc::clone(&stop_flag);
+            let next_op = Arc::clone(&next_op);
+            let worker_tx = secondary_tx.clone();
+            let range = plan.range.clone();
+            let fd = plan.target.fd;
+            secondary_joins.push(thread::spawn(move || {
+                let stats = worker_loop_with_fd(
+                    worker_id, &profile, range, counters, stop, next_op, started, fd, false,
+                );
+                if stats.is_err() {
+                    failure_stop.store(true, Ordering::Relaxed);
+                }
+                let _ = worker_tx.send(stats.map_err(|err| format!("{err:#}")));
+            }));
+        }
+        drop(secondary_tx);
+        secondary_runtimes.push(SecondaryRuntime {
+            target_path: plan.profile.target.path.clone(),
+            counters,
+            joins: secondary_joins,
+            rx: secondary_rx,
+            _target: plan.target,
+        });
+    }
+
     let mut join_error = None::<String>;
+    let mut worker_error = None::<String>;
     for join in joins {
         if join.join().is_err() && join_error.is_none() {
             join_error = Some("worker thread panicked".to_string());
@@ -216,10 +341,41 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
     }
     stop_flag.store(true, Ordering::Relaxed);
     let _ = sampler.join();
+    let mut secondary_summaries = Vec::new();
+    for runtime in secondary_runtimes {
+        for join in runtime.joins {
+            if join.join().is_err() && join_error.is_none() {
+                join_error = Some("secondary worker thread panicked".to_string());
+            }
+        }
+        let mut secondary_error = None::<String>;
+        for local in runtime.rx.into_iter() {
+            if let Err(err) = local {
+                secondary_error.get_or_insert(err);
+            }
+        }
+        if let Some(err) = secondary_error {
+            worker_error.get_or_insert(err);
+        }
+        let current = snapshot_counters(&runtime.counters);
+        secondary_summaries.push(SecondaryRunSummary {
+            target: runtime.target_path,
+            ops_completed: current
+                .read_ios_completed
+                .saturating_add(current.write_ios_completed),
+            bytes_completed: current
+                .read_bytes_completed
+                .saturating_add(current.write_bytes_completed),
+            errors: current.failed_reads.saturating_add(current.failed_writes),
+        });
+    }
+    drop(checkpoint_tx);
+    if let Some(writer) = checkpoint_writer {
+        let _ = writer.join();
+    }
 
     let intervals = interval_rx.into_iter().collect::<Vec<_>>();
     let mut merged = LocalStats::default();
-    let mut worker_error = None::<String>;
     for local in worker_rx.into_iter() {
         match local {
             Ok(local) => {
@@ -231,6 +387,8 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
             Err(_) => {}
         }
     }
+    // Surface the first worker failure to the caller instead of silently folding it
+    // into an empty summary. That makes impossible ranges and open failures obvious.
     if let Some(err) = join_error {
         bail!("workload worker failed: {err}");
     }
@@ -278,6 +436,7 @@ pub fn execute_profile(profile: &Profile) -> Result<(RunSummary, Vec<IntervalSta
             addressed_range_start_bytes: resolved_range.start_bytes,
             addressed_range_length_bytes: resolved_range.length_bytes,
             logical_sector_size: resolved_range.logical_sector_size,
+            secondary_summaries,
             notes,
         },
         intervals,
@@ -390,6 +549,28 @@ fn choose_backend() -> String {
     "pread_pwrite".to_string()
 }
 
+fn prepare_secondary_plans(profile: &Profile) -> Result<Vec<SecondaryExecutionPlan>> {
+    let mut plans = Vec::new();
+    for secondary in &profile.secondary_targets {
+        let mut secondary_profile = profile.clone();
+        secondary_profile.target = secondary.target.clone();
+        secondary_profile.workload = secondary.workload.clone();
+        secondary_profile.addressing = secondary.addressing.clone();
+        secondary_profile.workload.worker_count = secondary.worker_count;
+        let target_len = prepare_target(&secondary_profile)?;
+        let logical_sector_size = detect_logical_sector_size(&secondary_profile);
+        let resolved_range = secondary_profile.resolved_range(target_len, logical_sector_size)?;
+        validate_alignment(&secondary_profile, &resolved_range)?;
+        let target = open_fd(&secondary_profile, secondary_profile.is_write_workload())?;
+        plans.push(SecondaryExecutionPlan {
+            profile: secondary_profile,
+            range: resolved_range,
+            target,
+        });
+    }
+    Ok(plans)
+}
+
 fn worker_loop(
     worker_id: usize,
     profile: &Profile,
@@ -399,10 +580,30 @@ fn worker_loop(
     next_op: Arc<AtomicU64>,
     started: Instant,
 ) -> Result<LocalStats> {
+    let write_access = profile.is_write_workload();
+    let target = open_fd(profile, write_access)?;
+    let local = worker_loop_with_fd(
+        worker_id, profile, range, counters, stop_flag, next_op, started, target.fd, true,
+    )?;
+    unsafe { libc::close(target.fd) };
+    drop(target);
+    Ok(local)
+}
+
+fn worker_loop_with_fd(
+    worker_id: usize,
+    profile: &Profile,
+    range: ResolvedRange,
+    counters: Arc<GlobalCounters>,
+    stop_flag: Arc<AtomicBool>,
+    next_op: Arc<AtomicU64>,
+    started: Instant,
+    fd: RawFd,
+    owns_stop_condition: bool,
+) -> Result<LocalStats> {
     let mut local = LocalStats::default();
     let block = profile.workload.block_size_bytes;
     let write_access = profile.is_write_workload();
-    let fd = open_fd(profile, write_access)?;
     let mut io_buffer = AlignedBuffer::new(block, block.max(range.logical_sector_size as usize))?;
     let mut verify_buffer =
         AlignedBuffer::new(block, block.max(range.logical_sector_size as usize))?;
@@ -414,23 +615,28 @@ fn worker_loop(
             break;
         }
 
-        let maybe_op_index = match profile.stop_condition() {
-            StopCondition::ExactOperationCount => {
-                let op = next_op.fetch_add(1, Ordering::Relaxed);
-                let max_ops = profile.workload.exact_op_count.unwrap_or(0);
-                if op >= max_ops {
-                    None
-                } else {
-                    Some(op)
+        let maybe_op_index = if owns_stop_condition {
+            match profile.stop_condition() {
+                StopCondition::ExactOperationCount => {
+                    let op = next_op.fetch_add(1, Ordering::Relaxed);
+                    let max_ops = profile.workload.exact_op_count.unwrap_or(0);
+                    if op >= max_ops {
+                        None
+                    } else {
+                        Some(op)
+                    }
+                }
+                StopCondition::RuntimeSeconds => {
+                    if started.elapsed().as_secs() >= profile.workload.runtime_seconds.unwrap_or(0)
+                    {
+                        None
+                    } else {
+                        Some(next_op.fetch_add(1, Ordering::Relaxed))
+                    }
                 }
             }
-            StopCondition::RuntimeSeconds => {
-                if started.elapsed().as_secs() >= profile.workload.runtime_seconds.unwrap_or(0) {
-                    None
-                } else {
-                    Some(next_op.fetch_add(1, Ordering::Relaxed))
-                }
-            }
+        } else {
+            Some(next_op.fetch_add(1, Ordering::Relaxed))
         };
         let Some(op_index) = maybe_op_index else {
             break;
@@ -555,7 +761,6 @@ fn worker_loop(
             counters.sync_failures.fetch_add(1, Ordering::Relaxed);
         }
     }
-    unsafe { libc::close(fd) };
     Ok(local)
 }
 
@@ -589,7 +794,19 @@ fn compute_op_kind(profile: &Profile, op_index: u64) -> IoKind {
     }
 }
 
-fn open_fd(profile: &Profile, write_access: bool) -> Result<RawFd> {
+fn open_fd(profile: &Profile, write_access: bool) -> Result<OpenTarget> {
+    let boot_partition = is_boot_partition(&profile.target.path);
+    if boot_partition && write_access && !profile.safety.allow_boot_partition_write {
+        bail!(
+            "refusing write access to boot partition {} without safety.allow_boot_partition_write",
+            profile.target.path.display()
+        );
+    }
+    let boot_guard = if boot_partition {
+        Some(BootPartitionGuard::unlock(&profile.target.path)?)
+    } else {
+        None
+    };
     let mut flags = if write_access {
         libc::O_RDWR
     } else {
@@ -603,7 +820,10 @@ fn open_fd(profile: &Profile, write_access: bool) -> Result<RawFd> {
     if fd < 0 {
         bail!("failed to open {}", profile.target.path.display());
     }
-    Ok(fd)
+    Ok(OpenTarget {
+        fd,
+        _boot_guard: boot_guard,
+    })
 }
 
 fn do_pread(fd: RawFd, ptr: *mut u8, len: usize, offset: i64) -> Result<usize> {
