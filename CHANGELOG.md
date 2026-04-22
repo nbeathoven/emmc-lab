@@ -2,7 +2,7 @@
 
 All notable changes to `emmc-lab` are documented in this file.
 
-## v0.2.6 - 2026-04-21
+## v0.2.8 - 2026-04-21
 
 - decoded the eMMC CID register in every health snapshot so reports now show manufacturer ID, product name, serial number, and manufacturing date instead of only raw sysfs strings
 - added the `Concurrent Partition Stress` quick preset for reading boot-partition sectors while writing a selected user partition on the same eMMC device

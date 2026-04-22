@@ -1,7 +1,7 @@
 # emmc-lab: Endurance Test Features — Agent Work Order
 
 > **Audience**: AI coding agent. Read this entire document before writing any code.
-> **Codebase**: Rust, Linux-only, single binary. v0.2.6, 13 k lines across 16 modules.
+> **Codebase**: Rust, Linux-only, single binary. v0.2.8, 13 k lines across 16 modules.
 > **Read first**: `AGENT_ARCHITECTURE.md` for the full module map and coding conventions.
 
 ---
