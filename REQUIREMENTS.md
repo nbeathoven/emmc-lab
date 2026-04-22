@@ -1,6 +1,6 @@
 # emmc-lab: Open Requirements
 
-> Status snapshot — April 2026. Based on codebase audit at v0.2.8.
+> Status snapshot — April 2026. Based on codebase audit at v0.2.9.
 > Completed items are listed at the bottom for reference.
 
 ---

@@ -40,10 +40,47 @@ pub enum IoDirection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceEvent {
     pub timestamp_ns: u64,
+    #[serde(default)]
+    pub pid: Option<u32>,
     pub lba: u64,
     pub length_sectors: u64,
     pub direction: IoDirection,
     pub action: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LbaHeatmapBucket {
+    pub start_lba: u64,
+    pub end_lba: u64,
+    pub read_count: u64,
+    pub write_count: u64,
+    pub discard_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KernelIoBucket {
+    pub source: String,
+    pub read_events: u64,
+    pub write_events: u64,
+    pub sectors_read: u64,
+    pub sectors_written: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TraceEventSummary {
+    pub total_events: u64,
+    pub read_events: u64,
+    pub write_events: u64,
+    pub discard_events: u64,
+    pub flush_events: u64,
+    pub lba_heatmap: Vec<LbaHeatmapBucket>,
+    pub events_per_second: Vec<u64>,
+    pub peak_iops_read: f64,
+    pub peak_iops_write: f64,
+    pub attributed_events: u64,
+    pub unattributed_events: u64,
+    pub kernel_io_estimate: u64,
+    pub kernel_buckets: Vec<KernelIoBucket>,
 }
 
 /// A sorted file-ownership range derived from FIEMAP/FIBMAP data.
@@ -69,6 +106,7 @@ pub struct LbaTraceReport {
     pub duration_secs: u64,
     pub event_count: usize,
     pub events: Vec<TraceEvent>,
+    pub summary: TraceEventSummary,
     pub owner_index: Vec<LbaOwnerRange>,
     pub method: String,
 }
@@ -105,7 +143,7 @@ fn capture_lba_trace_linux(opts: LbaTraceOptions) -> Result<LbaTraceReport> {
     // This is deliberately a CLI-backed first pass. The format string keeps the output
     // small and stable enough to parse without pretending we already have a relay reader.
     let command = format!(
-        "blktrace -d {device_quoted} -w {duration} -o - 2>/dev/null | blkparse -q -i - -f '%T %t %a %d %S %n\\n'"
+        "blktrace -d {device_quoted} -w {duration} -o - 2>/dev/null | blkparse -q -i - -f '%T %t %p %a %d %S %n\\n'"
     );
     let output = Command::new("sh")
         .arg("-c")
@@ -131,11 +169,14 @@ fn capture_lba_trace_linux(opts: LbaTraceOptions) -> Result<LbaTraceReport> {
         events.push(event);
     }
 
+    let summary = summarize_trace_events(&events, duration);
+
     Ok(LbaTraceReport {
         device: opts.device,
         duration_secs: duration,
         event_count: events.len(),
         events,
+        summary,
         owner_index,
         method: "blktrace-cli".to_string(),
     })
@@ -146,6 +187,7 @@ fn parse_trace_line(line: &str) -> Option<TraceEvent> {
     let mut parts = line.split_whitespace();
     let seconds = parts.next()?.parse::<u64>().ok()?;
     let nanos = parts.next()?.parse::<u64>().ok()?;
+    let pid = parts.next()?.parse::<u32>().ok();
     let action_name = parts.next()?;
     if action_name != "D" {
         return None;
@@ -156,11 +198,95 @@ fn parse_trace_line(line: &str) -> Option<TraceEvent> {
     let action = action_mask_from_rwbs(rwbs);
     Some(TraceEvent {
         timestamp_ns: seconds.saturating_mul(1_000_000_000).saturating_add(nanos),
+        pid,
         lba,
         length_sectors,
         direction: decode_blk_action(action),
         action,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn summarize_trace_events(events: &[TraceEvent], duration_secs: u64) -> TraceEventSummary {
+    let mut summary = TraceEventSummary::default();
+    summary.total_events = events.len() as u64;
+    let max_lba = events
+        .iter()
+        .map(|event| event.lba.saturating_add(event.length_sectors))
+        .max()
+        .unwrap_or(0);
+    let bucket_size = (max_lba / 16).max(1);
+    summary.lba_heatmap = (0..16)
+        .map(|index| LbaHeatmapBucket {
+            start_lba: index * bucket_size,
+            end_lba: ((index + 1) * bucket_size).saturating_sub(1),
+            ..LbaHeatmapBucket::default()
+        })
+        .collect();
+    summary.events_per_second = vec![0; duration_secs.max(1) as usize];
+    let mut kernel = KernelIoBucket {
+        source: "unknown-kernel".to_string(),
+        ..KernelIoBucket::default()
+    };
+    let mut read_peak = 0_u64;
+    let mut write_peak = 0_u64;
+    let mut read_per_sec = vec![0_u64; duration_secs.max(1) as usize];
+    let mut write_per_sec = vec![0_u64; duration_secs.max(1) as usize];
+    for event in events {
+        let sec = (event.timestamp_ns / 1_000_000_000)
+            .min(summary.events_per_second.len().saturating_sub(1) as u64)
+            as usize;
+        summary.events_per_second[sec] += 1;
+        let bucket_index =
+            ((event.lba / bucket_size) as usize).min(summary.lba_heatmap.len().saturating_sub(1));
+        match event.direction {
+            IoDirection::Read => {
+                summary.read_events += 1;
+                summary.lba_heatmap[bucket_index].read_count += 1;
+                read_per_sec[sec] += 1;
+            }
+            IoDirection::Write => {
+                summary.write_events += 1;
+                summary.lba_heatmap[bucket_index].write_count += 1;
+                write_per_sec[sec] += 1;
+            }
+            IoDirection::Discard => {
+                summary.discard_events += 1;
+                summary.lba_heatmap[bucket_index].discard_count += 1;
+            }
+            IoDirection::Flush => summary.flush_events += 1,
+            IoDirection::Other => {}
+        }
+        if event.pid.unwrap_or(0) == 0 {
+            summary.kernel_io_estimate += 1;
+            summary.unattributed_events += 1;
+            match event.direction {
+                IoDirection::Read => {
+                    kernel.read_events += 1;
+                    kernel.sectors_read += event.length_sectors;
+                }
+                IoDirection::Write => {
+                    kernel.write_events += 1;
+                    kernel.sectors_written += event.length_sectors;
+                }
+                _ => {}
+            }
+        } else {
+            summary.attributed_events += 1;
+        }
+    }
+    if kernel.read_events != 0 || kernel.write_events != 0 {
+        summary.kernel_buckets.push(kernel);
+    }
+    for value in read_per_sec {
+        read_peak = read_peak.max(value);
+    }
+    for value in write_per_sec {
+        write_peak = write_peak.max(value);
+    }
+    summary.peak_iops_read = read_peak as f64;
+    summary.peak_iops_write = write_peak as f64;
+    summary
 }
 
 #[cfg(target_os = "linux")]

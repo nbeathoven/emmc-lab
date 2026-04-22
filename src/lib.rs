@@ -18,6 +18,7 @@ pub mod app;
 pub mod boot_partition;
 pub mod cli;
 pub mod diagnostics;
+pub mod discard;
 pub mod engine;
 pub mod filemap;
 pub mod geometry;

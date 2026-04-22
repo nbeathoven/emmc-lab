@@ -9,7 +9,7 @@
 - JSON, CSV, and HTML reporting
 - an SSH-friendly interactive menu plus direct automation commands
 
-Current release: `v0.2.8`
+Current release: `v0.2.9`
 
 License: [MIT](LICENSE)
 
@@ -322,7 +322,7 @@ If an optional feature is unavailable, `emmc-lab` reports that clearly and falls
 
 ## Versioning and Releases
 
-- Crate version: `0.2.8`
+- Crate version: `0.2.9`
 - License: `MIT`
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - GitHub releases: [Releases](https://github.com/nbeathoven/emmc-lab/releases)

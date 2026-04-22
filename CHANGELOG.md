@@ -2,6 +2,15 @@
 
 All notable changes to `emmc-lab` are documented in this file.
 
+## v0.2.9 - 2026-04-22
+
+- merged the storage subsystem phase-2/3 work into `main`
+- expanded eMMC health decoding with richer EXT_CSD, CID, CSD, and partition metadata
+- expanded file mapping with device chains, extent summaries, erase-alignment analysis, and directory scans
+- added discard capability detection and safe BLKDISCARD probe/test command paths
+- enriched block trace reporting with summary counts, heatmap buckets, kernel/unattributed estimates, and PID capture
+- added endurance estimate output alongside the existing read-disturb estimate
+
 ## v0.2.8 - 2026-04-21
 
 - decoded the eMMC CID register in every health snapshot so reports now show manufacturer ID, product name, serial number, and manufacturing date instead of only raw sysfs strings

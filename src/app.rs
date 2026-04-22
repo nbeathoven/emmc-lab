@@ -1,12 +1,13 @@
 use crate::diagnostics::{
     run_deep_trace, run_live_sampler, run_live_sampler_until, DiagnosticReport, LiveSamplerState,
 };
+use crate::discard::{detect_discard, probe_discard, run_discard_test};
 use crate::engine::{execute_profile_with_checkpointing, CheckpointRuntime};
 use crate::filemap;
 use crate::geometry::collect_block_geometry;
 use crate::health::{
-    build_read_disturb_model, collect_health, format_raw_extcsd_dump, read_emmc_health,
-    ReadDisturbInput,
+    build_endurance_model, build_read_disturb_model, collect_health, format_raw_extcsd_dump,
+    read_emmc_health, ReadDisturbInput,
 };
 use crate::health_compare::{self, render_health_compare_html};
 use crate::integrity::{
@@ -36,7 +37,7 @@ use crate::ui::{
     render_live_monitor, render_selector_screen, render_settings, render_warning_banner,
     SelectorColumn, SelectorRow,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::{Local, Utc};
 use std::env;
 use std::ffi::CString;
@@ -295,6 +296,7 @@ pub fn run_profile_session(paths: &AppPaths, profile: Profile) -> Result<String>
     let session_id = session_id();
     let mut record = SessionRecord::new(session_id.clone());
     record.profile = Some(profile.clone());
+    record.discard_capability = detect_discard(&profile.target.path).ok();
     record.notes.push(
         "Logical sector/LBA targeting only. The application does not claim fixed physical NAND cell targeting."
             .to_string(),
@@ -576,6 +578,17 @@ pub fn run_health(
     ) {
         let model = build_read_disturb_model(ReadDisturbInput {
             total_bytes_read,
+            total_bytes_written: host_total_bytes_written(device).unwrap_or(0),
+            total_bytes_discarded: host_total_bytes_discarded(device).unwrap_or(0),
+            page_size_kb,
+            pages_per_block,
+            read_disturb_threshold,
+            device_capacity_bytes: sec_count.saturating_mul(512),
+        });
+        let endurance = build_endurance_model(ReadDisturbInput {
+            total_bytes_read,
+            total_bytes_written: host_total_bytes_written(device).unwrap_or(0),
+            total_bytes_discarded: host_total_bytes_discarded(device).unwrap_or(0),
             page_size_kb,
             pages_per_block,
             read_disturb_threshold,
@@ -589,6 +602,20 @@ pub fn run_health(
         println!("  threshold_ratio={:.4}", model.threshold_ratio);
         println!("  risk_label={}", model.risk_label);
         for caveat in model.caveats {
+            println!("  note: {caveat}");
+        }
+        println!("Endurance Estimate:");
+        println!(
+            "  estimated_program_erase_cycles={:.4}",
+            endurance.estimated_program_erase_cycles
+        );
+        println!(
+            "  read_disturb_reads_per_block={:.4}",
+            endurance.read_disturb_reads_per_block
+        );
+        println!("  read_disturb_ratio={:.4}", endurance.read_disturb_ratio);
+        println!("  read_disturb_risk={:?}", endurance.read_disturb_risk);
+        for caveat in endurance.caveats {
             println!("  note: {caveat}");
         }
     }
@@ -634,39 +661,130 @@ pub fn run_diag_sample(
     Ok(session_id)
 }
 
-pub fn run_file_map(file: &Path, device: Option<&Path>, csv: bool) -> Result<()> {
-    let report = filemap::collect_file_map(file, device)?;
-    if csv {
-        print!("{}", filemap::filemap_report_to_csv(&report));
-        return Ok(());
-    }
-
-    println!("File: {}", report.file_path.display());
-    println!("Device: {}", report.device.display());
-    println!("Method: {}", report.method);
-    println!("Sector Size: {}", report.sector_size);
-    if let Some(start) = report.partition_start_lba {
-        println!("Partition Start LBA: {start}");
-    }
-    if let Some(erase_block_size) = report.erase_block_size {
-        println!("Erase Block Size: {erase_block_size}");
-    }
-    println!("Extents: {}", report.extent_count);
-    println!(
-        "{:<6} {:>14} {:>14} {:>12}  Flags",
-        "Index", "Logical", "Physical LBA", "Length"
-    );
-    for (index, extent) in report.extents.iter().enumerate() {
-        let physical_lba = extent.physical_offset / report.sector_size.max(1);
-        let flags = if extent.flag_names.is_empty() {
-            "-".to_string()
-        } else {
-            extent.flag_names.join("|")
-        };
+pub fn run_file_map(
+    file: Option<&Path>,
+    dir: Option<&Path>,
+    device: Option<&Path>,
+    csv: bool,
+    summary: bool,
+    erase_align: bool,
+) -> Result<()> {
+    let reports = match (file, dir) {
+        (Some(file), None) => vec![filemap::collect_file_map(file, device)?],
+        (None, Some(dir)) => {
+            let mut files = Vec::new();
+            collect_regular_files(dir, &mut files)?;
+            filemap::collect_multi_file_map(&files)?
+        }
+        (Some(_), Some(_)) => return Err(anyhow!("choose either a file or --dir, not both")),
+        (None, None) => return Err(anyhow!("missing file or --dir")),
+    };
+    for (index, report) in reports.iter().enumerate() {
+        if csv {
+            if index > 0 {
+                println!();
+            }
+            print!("{}", filemap::filemap_report_to_csv(report));
+            continue;
+        }
+        println!("File: {}", report.file_path.display());
+        println!("Mountpoint: {}", report.mountpoint.display());
+        println!("Filesystem: {}", report.filesystem_type);
+        println!("Device: {}", report.device.display());
+        if !report.device_chain.is_empty() {
+            println!(
+                "Device Chain: {}",
+                report
+                    .device_chain
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" -> ")
+            );
+        }
+        println!("Method: {}", report.method);
+        println!("Sector Size: {}", report.sector_size);
+        if let Some(start) = report.partition_start_lba {
+            println!("Partition Start LBA: {start}");
+        }
+        if let Some(erase_block_size) = report.erase_block_size {
+            println!("Erase Block Size: {erase_block_size}");
+        }
         println!(
-            "{:<6} {:>14} {:>14} {:>12}  {}",
-            index, extent.logical_offset, physical_lba, extent.length, flags
+            "Extent Summary: extents={} bytes={} frag_ratio={:.2} physical_span={} shared={} unwritten={} inline={}",
+            report.extent_summary.total_extents,
+            report.extent_summary.total_bytes,
+            report.extent_summary.fragmentation_ratio,
+            report.extent_summary.physical_span_bytes,
+            report.extent_summary.shared_extents,
+            report.extent_summary.unwritten_extents,
+            report.extent_summary.inline_extents
         );
+        if summary {
+            if erase_align {
+                if let Some(alignment) = &report.erase_alignment {
+                    println!(
+                        "Erase Alignment: size={} aligned={} crossing={}",
+                        alignment.erase_block_size,
+                        alignment.extents_aligned,
+                        alignment.extents_crossing
+                    );
+                }
+            }
+            if index + 1 < reports.len() {
+                println!();
+            }
+            continue;
+        }
+        println!(
+            "{:<6} {:>14} {:>14} {:>12}  Flags",
+            "Index", "Logical", "Physical LBA", "Length"
+        );
+        for (extent_index, extent) in report.extents.iter().enumerate() {
+            let physical_lba = extent.physical_offset / report.sector_size.max(1);
+            let flags = if extent.flag_names.is_empty() {
+                "-".to_string()
+            } else {
+                extent.flag_names.join("|")
+            };
+            println!(
+                "{:<6} {:>14} {:>14} {:>12}  {}",
+                extent_index, extent.logical_offset, physical_lba, extent.length, flags
+            );
+        }
+        if erase_align {
+            if let Some(alignment) = &report.erase_alignment {
+                println!(
+                    "Erase Alignment: size={} aligned={} crossing={}",
+                    alignment.erase_block_size,
+                    alignment.extents_aligned,
+                    alignment.extents_crossing
+                );
+                for (offset, length, blocks) in alignment.crossing_details.iter().take(10) {
+                    println!(
+                        "  crossing offset={} length={} blocks_spanned={}",
+                        offset, length, blocks
+                    );
+                }
+            }
+        }
+        if index + 1 < reports.len() {
+            println!();
+        }
+    }
+    Ok(())
+}
+
+fn collect_regular_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            collect_regular_files(&path, files)?;
+        } else if metadata.is_file() {
+            files.push(path);
+        }
     }
     Ok(())
 }
@@ -688,6 +806,18 @@ pub fn run_lba_trace(
     println!("Method: {}", report.method);
     println!("Duration: {}s", report.duration_secs);
     println!("Events: {}", report.event_count);
+    println!(
+        "Summary: reads={} writes={} discards={} flushes={} attributed={} unattributed={} kernel_estimate={} peak_read_iops={:.1} peak_write_iops={:.1}",
+        report.summary.read_events,
+        report.summary.write_events,
+        report.summary.discard_events,
+        report.summary.flush_events,
+        report.summary.attributed_events,
+        report.summary.unattributed_events,
+        report.summary.kernel_io_estimate,
+        report.summary.peak_iops_read,
+        report.summary.peak_iops_write
+    );
     for event in &report.events {
         let summary =
             if let Some(hit) = lba_trace::match_lba_to_file(event.lba, &report.owner_index) {
@@ -696,8 +826,16 @@ pub fn run_lba_trace(
                 String::new()
             };
         println!(
-            "ts={} dir={:?} lba={} sectors={}{}",
-            event.timestamp_ns, event.direction, event.lba, event.length_sectors, summary
+            "ts={} pid={} dir={:?} lba={} sectors={}{}",
+            event.timestamp_ns,
+            event
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            event.direction,
+            event.lba,
+            event.length_sectors,
+            summary
         );
     }
     Ok(())
@@ -736,6 +874,54 @@ pub fn run_health_compare(
         fs::write(html_output, render_health_compare_html(&report))
             .map_err(|err| anyhow::anyhow!("failed to write {}: {err}", html_output.display()))?;
         println!("HTML report: {}", html_output.display());
+    }
+    Ok(())
+}
+
+pub fn run_discard(
+    device: &Path,
+    probe: bool,
+    test: bool,
+    offset: Option<u64>,
+    length: Option<u64>,
+    destructive_confirmation: bool,
+) -> Result<()> {
+    let capability = detect_discard(device)?;
+    println!("Device: {}", capability.device.display());
+    println!("Discard supported: {}", capability.discard_supported);
+    println!("Discard granularity: {}", capability.discard_granularity);
+    println!("Discard max bytes: {}", capability.discard_max_bytes);
+    println!("blkdiscard available: {}", capability.blkdiscard_available);
+    println!("fstrim available: {}", capability.fstrim_available);
+    println!(
+        "BLKDISCARD ioctl viable: {}",
+        capability.blkdiscard_ioctl_viable
+    );
+    if probe || test {
+        let offset = offset.ok_or_else(|| anyhow!("--offset is required for probe/test"))?;
+        let length = length.ok_or_else(|| anyhow!("--length is required for probe/test"))?;
+        if probe {
+            let result = probe_discard(device, offset, length, destructive_confirmation)?;
+            println!(
+                "Probe: success={} duration_us={} error={}",
+                result.success,
+                result.duration_us,
+                result.error.as_deref().unwrap_or("-")
+            );
+        }
+        if test {
+            let results = run_discard_test(device, &[(offset, length)], destructive_confirmation)?;
+            for result in results {
+                println!(
+                    "Discard: offset={} length={} success={} duration_us={} error={}",
+                    result.probe_offset,
+                    result.probe_length,
+                    result.success,
+                    result.duration_us,
+                    result.error.as_deref().unwrap_or("-")
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -3953,6 +4139,26 @@ fn host_total_bytes_read(device: &Path) -> Option<u64> {
     stats
         .get(&disk_name)
         .and_then(|values| values.get(2).copied())
+        .map(|sectors| sectors.saturating_mul(512))
+}
+
+fn host_total_bytes_written(device: &Path) -> Option<u64> {
+    let name = device.file_name()?.to_string_lossy().to_string();
+    let disk_name = canonical_diskstats_name(&name);
+    let stats = diskstats_map();
+    stats
+        .get(&disk_name)
+        .and_then(|values| values.get(6).copied())
+        .map(|sectors| sectors.saturating_mul(512))
+}
+
+fn host_total_bytes_discarded(device: &Path) -> Option<u64> {
+    let name = device.file_name()?.to_string_lossy().to_string();
+    let disk_name = canonical_diskstats_name(&name);
+    let stats = diskstats_map();
+    stats
+        .get(&disk_name)
+        .and_then(|values| values.get(13).copied())
         .map(|sectors| sectors.saturating_mul(512))
 }
 
