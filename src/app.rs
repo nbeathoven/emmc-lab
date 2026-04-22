@@ -111,7 +111,7 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
         let items = vec![
             MenuItem {
                 columns: vec!["Run Workload".to_string(), "presets, wizard, saved, repeat".to_string()],
-                detail: "Scope: file targets or raw devices. Risk: varies by selected workflow and can become destructive on raw-device write runs. Open workload entry points including quick presets, guided custom runs, saved profiles, and repeat-last-run.".to_string(),
+                detail: "Open: presets, wizard, saved, repeat".to_string(),
             },
             MenuItem {
                 columns: vec!["Diagnostics".to_string(), "live monitor, capture, deep trace".to_string()],
