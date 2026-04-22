@@ -1,5 +1,6 @@
+use crate::lba_trace::{capture_lba_trace, IoDirection, LbaTraceOptions, TraceEvent};
 use crate::system::{
-    deep_trace_available, diskstats_map, list_devices, read_link_string, resolve_uid_to_user,
+    detect_trace_capabilities, diskstats_map, list_devices, read_link_string, resolve_uid_to_user,
 };
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -9,6 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::Arc;
 use std::thread;
@@ -206,6 +208,10 @@ pub struct DiagnosticReport {
     pub attribution_note: String,
     #[serde(default)]
     pub fallback_message: Option<String>,
+    #[serde(default)]
+    pub trace_backend: Option<String>,
+    #[serde(default)]
+    pub trace_event_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -398,6 +404,8 @@ fn run_live_sampler_internal(
             fallback_message: Some(
                 "live sampler unavailable because /proc is not present or not readable".to_string(),
             ),
+            trace_backend: None,
+            trace_event_count: None,
         });
     }
     let mut state = LiveSamplerState::new(session_id)?;
@@ -694,6 +702,8 @@ fn build_sampler_report(
         dropped_event_count: 0,
         attribution_note: "Logical syscall bytes (rchar/wchar) and storage-layer bytes (read_bytes/write_bytes) are reported separately. File and directory attribution in sampler mode is best-effort based on observed open descriptors, fdinfo metadata, and procfs deltas; it is not exact per-file kernel attribution. Processes owned by other users may require root to read /proc/<pid>/io, and device-level bytes may exceed process-attributed bytes when kernel writeback, journaling, or restricted processes are active.".to_string(),
         fallback_message: None,
+        trace_backend: None,
+        trace_event_count: None,
     }
 }
 
@@ -702,55 +712,142 @@ pub fn run_deep_trace(
     session_id: Option<String>,
     fallback_to_sampler: bool,
 ) -> Result<DiagnosticReport> {
-    if !deep_trace_available() {
-        if fallback_to_sampler {
+    let trace = detect_trace_capabilities();
+    if trace.is_root && trace.bpftrace_available && trace.tracefs_available {
+        if let Ok(events) = capture_bpftrace_events(duration) {
             let mut report = run_live_sampler(duration, Duration::from_secs(1), session_id)?;
             report.mode = DiagnosticMode::DeepTrace;
+            report.trace_backend = Some("bpftrace".to_string());
+            report.trace_event_count = Some(events.len() as u64);
             report.fallback_message = Some(
-                "deep trace unavailable; falling back to live sampler because root and tracing facilities are not available".to_string(),
+                "deep trace used bpftrace block completion events and sampler-grade process attribution".to_string(),
             );
-            report.dropped_event_count = 0;
+            report.attribution_note = format!(
+                "bpftrace captured {} block completion events. Process and file views remain procfs-derived best-effort attribution.",
+                events.len()
+            );
             return Ok(report);
         }
-        return Ok(DiagnosticReport {
-            mode: DiagnosticMode::DeepTrace,
-            session_id,
-            started_at: Utc::now(),
-            ended_at: Utc::now(),
-            duration_seconds: 0,
-            top_processes: vec![],
-            top_files: vec![],
-            top_directories: vec![],
-            device_totals: vec![],
-            block_stats_timeline: vec![],
-            restricted_process_count: 0,
-            kernel_process_count: 0,
-            restricted_processes: vec![],
-            kernel_activity: vec![],
-            observed_storage_read_bytes: 0,
-            observed_storage_write_bytes: 0,
-            device_storage_read_bytes: 0,
-            device_storage_write_bytes: 0,
-            unattributed_storage_read_bytes: 0,
-            unattributed_storage_write_bytes: 0,
-            process_excess_storage_read_bytes: 0,
-            process_excess_storage_write_bytes: 0,
-            unresolved_path_count: 0,
-            dropped_event_count: 0,
-            attribution_note: "deep trace requires root and kernel tracing support; when unavailable, the application can fall back to sampler mode".to_string(),
-            fallback_message: Some(
-                "deep trace unavailable: root privileges and tracing/eBPF support were not detected".to_string(),
-            ),
+    }
+    if trace.is_root && trace.blktrace_available && trace.debugfs_mounted {
+        if let Some(device) = first_trace_device() {
+            if let Ok(trace_report) = capture_lba_trace(LbaTraceOptions {
+                device,
+                duration_secs: duration.as_secs().max(1),
+                lba_filter: None,
+                map_files: Vec::new(),
+            }) {
+                let mut report = run_live_sampler(duration, Duration::from_secs(1), session_id)?;
+                report.mode = DiagnosticMode::DeepTrace;
+                report.trace_backend = Some("blktrace".to_string());
+                report.trace_event_count = Some(trace_report.event_count as u64);
+                report.fallback_message = Some(
+                    "deep trace used blktrace for block events and sampler-grade process attribution".to_string(),
+                );
+                report.attribution_note = format!(
+                    "blktrace captured {} events. Process and file views remain procfs-derived best-effort attribution.",
+                    trace_report.event_count
+                );
+                return Ok(report);
+            }
+        }
+    }
+    if fallback_to_sampler {
+        let mut report = run_live_sampler(duration, Duration::from_secs(1), session_id)?;
+        report.mode = DiagnosticMode::DeepTrace;
+        report.trace_backend = Some("procfs-sampler".to_string());
+        report.trace_event_count = Some(0);
+        report.fallback_message =
+            Some("deep trace backend unavailable; fell back to procfs sampler".to_string());
+        report.dropped_event_count = 0;
+        return Ok(report);
+    }
+    Ok(DiagnosticReport {
+        mode: DiagnosticMode::DeepTrace,
+        session_id,
+        started_at: Utc::now(),
+        ended_at: Utc::now(),
+        duration_seconds: 0,
+        top_processes: vec![],
+        top_files: vec![],
+        top_directories: vec![],
+        device_totals: vec![],
+        block_stats_timeline: vec![],
+        restricted_process_count: 0,
+        kernel_process_count: 0,
+        restricted_processes: vec![],
+        kernel_activity: vec![],
+        observed_storage_read_bytes: 0,
+        observed_storage_write_bytes: 0,
+        device_storage_read_bytes: 0,
+        device_storage_write_bytes: 0,
+        unattributed_storage_read_bytes: 0,
+        unattributed_storage_write_bytes: 0,
+        process_excess_storage_read_bytes: 0,
+        process_excess_storage_write_bytes: 0,
+        unresolved_path_count: 0,
+        dropped_event_count: 0,
+        attribution_note: "deep trace requires bpftrace or blktrace support; when unavailable, the application can fall back to sampler mode".to_string(),
+        fallback_message: Some(
+            "deep trace unavailable: no usable bpftrace or blktrace backend was detected".to_string(),
+        ),
+        trace_backend: None,
+        trace_event_count: None,
+    })
+}
+
+fn capture_bpftrace_events(duration: Duration) -> Result<Vec<TraceEvent>> {
+    let seconds = duration.as_secs().max(1);
+    let script = "tracepoint:block:block_rq_complete { printf(\"%llu %d %s %llu %u\\n\", nsecs, pid, comm, args->sector, args->nr_sector); }";
+    let output = Command::new("bpftrace")
+        .arg("-e")
+        .arg(script)
+        .arg("-c")
+        .arg(format!("sleep {seconds}"))
+        .output()
+        .context("failed to execute bpftrace")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "bpftrace failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut events = Vec::new();
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let timestamp_ns = match parts.next().and_then(|v| v.parse::<u64>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let pid = parts.next().and_then(|v| v.parse::<u32>().ok());
+        let _comm = parts.next();
+        let lba = match parts.next().and_then(|v| v.parse::<u64>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        let length_sectors = match parts.next().and_then(|v| v.parse::<u64>().ok()) {
+            Some(value) => value,
+            None => continue,
+        };
+        events.push(TraceEvent {
+            timestamp_ns,
+            pid,
+            lba,
+            length_sectors,
+            direction: IoDirection::Other,
+            action: 0,
         });
     }
+    Ok(events)
+}
 
-    let mut report = run_live_sampler(duration, Duration::from_secs(1), session_id)?;
-    report.mode = DiagnosticMode::DeepTrace;
-    report.fallback_message = Some(
-        "deep trace prerequisites are present, but this build is using sampler-grade attribution as a graceful fallback because the optional eBPF tracer backend is not bundled.".to_string(),
-    );
-    report.attribution_note = "This report is a best-effort fallback, not a kernel event trace. Requested/completed bytes, errno attribution, and syscall latency require the optional deep tracer backend.".to_string();
-    Ok(report)
+fn first_trace_device() -> Option<String> {
+    list_devices()
+        .ok()?
+        .into_iter()
+        .find(|device| !device.is_partition && device.size_bytes.unwrap_or(0) > 0)
+        .map(|device| device.path.display().to_string())
 }
 
 fn read_pid_snapshot(pid: i32) -> Result<ProcIo> {

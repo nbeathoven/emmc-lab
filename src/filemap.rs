@@ -31,19 +31,47 @@ pub struct MountResolution {
     pub mountpoint: PathBuf,
     pub device: PathBuf,
     pub fs_type: String,
+    pub device_chain: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ExtentSummary {
+    pub total_extents: usize,
+    pub total_bytes: u64,
+    pub fragmentation_ratio: f64,
+    pub physical_range_min: u64,
+    pub physical_range_max: u64,
+    pub physical_span_bytes: u64,
+    pub gaps: Vec<(u64, u64)>,
+    pub shared_extents: usize,
+    pub unwritten_extents: usize,
+    pub inline_extents: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EraseBlockAlignment {
+    pub erase_block_size: u64,
+    pub extents_aligned: usize,
+    pub extents_crossing: usize,
+    pub crossing_details: Vec<(u64, u64, usize)>,
 }
 
 /// The full file mapping report.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilemapReport {
     pub file_path: PathBuf,
+    pub mountpoint: PathBuf,
+    pub filesystem_type: String,
     pub device: PathBuf,
+    pub device_chain: Vec<PathBuf>,
     pub sector_size: u64,
     pub partition_start_lba: Option<u64>,
     pub erase_block_size: Option<u64>,
     pub extents: Vec<FilemapExtent>,
     pub total_extent_bytes: u64,
     pub extent_count: usize,
+    pub extent_summary: ExtentSummary,
+    pub erase_alignment: Option<EraseBlockAlignment>,
     pub method: String,
 }
 
@@ -97,18 +125,32 @@ fn collect_file_map_linux(file: &Path, device_override: Option<&Path>) -> Result
         .and_then(|snapshot| snapshot.erase_group_size_bytes);
     let total_extent_bytes = extents.iter().map(|extent| extent.length).sum();
     let extent_count = extents.len();
+    let extent_summary = summarize_extents(&extents);
+    let erase_alignment = erase_block_size.map(|size| analyze_erase_alignment(&extents, size));
 
     Ok(FilemapReport {
         file_path: file.to_path_buf(),
+        mountpoint: mount.mountpoint,
+        filesystem_type: mount.fs_type,
         device,
+        device_chain: mount.device_chain,
         sector_size,
         partition_start_lba,
         erase_block_size,
         extents,
         total_extent_bytes,
         extent_count,
+        extent_summary,
+        erase_alignment,
         method,
     })
+}
+
+pub fn collect_multi_file_map(files: &[PathBuf]) -> Result<Vec<FilemapReport>> {
+    files
+        .iter()
+        .map(|file| collect_file_map(file, None))
+        .collect::<Result<Vec<_>>>()
 }
 
 #[cfg(target_os = "linux")]
@@ -294,6 +336,7 @@ fn resolve_mount_for_file_from_text(file: &Path, mountinfo: &str) -> Result<Moun
             mountpoint: mountpoint.clone(),
             device: PathBuf::from(unescape_mount_field(right_parts[1])),
             fs_type: right_parts[0].to_string(),
+            device_chain: resolve_device_chain(Path::new(&unescape_mount_field(right_parts[1]))),
         };
         let better = best
             .as_ref()
@@ -398,25 +441,154 @@ fn read_partition_start_lba(device: &Path) -> Result<Option<u64>> {
 
 /// Render the mapping as CSV with one row per extent.
 pub fn filemap_report_to_csv(report: &FilemapReport) -> String {
-    let mut csv =
-        String::from("logical_offset,physical_lba,length,flags,flag_names,erase_aligned\n");
+    let mut csv = String::from(
+        "logical_offset,physical_lba,length,flags,flag_names,erase_aligned,blocks_spanned\n",
+    );
     for extent in &report.extents {
         let physical_lba = extent.physical_offset / report.sector_size.max(1);
-        let erase_aligned = report
-            .erase_block_size
-            .map(|size| size != 0 && extent.physical_offset % size == 0)
-            .unwrap_or(false);
+        let (erase_aligned, blocks_spanned) = match report.erase_block_size {
+            Some(size) if size != 0 => {
+                let start_block = extent.physical_offset / size;
+                let end_block = extent
+                    .physical_offset
+                    .saturating_add(extent.length.saturating_sub(1))
+                    / size;
+                (
+                    extent.physical_offset % size == 0,
+                    end_block.saturating_sub(start_block) + 1,
+                )
+            }
+            _ => (false, 0),
+        };
         csv.push_str(&format!(
-            "{},{},{},{},\"{}\",{}\n",
+            "{},{},{},{},\"{}\",{},{}\n",
             extent.logical_offset,
             physical_lba,
             extent.length,
             extent.flags,
             extent.flag_names.join("|"),
-            erase_aligned
+            erase_aligned,
+            blocks_spanned
         ));
     }
     csv
+}
+
+#[cfg(target_os = "linux")]
+fn summarize_extents(extents: &[FilemapExtent]) -> ExtentSummary {
+    if extents.is_empty() {
+        return ExtentSummary::default();
+    }
+    let mut physical = extents.to_vec();
+    physical.sort_by_key(|extent| extent.physical_offset);
+    let physical_range_min = physical
+        .first()
+        .map(|extent| extent.physical_offset)
+        .unwrap_or(0);
+    let physical_range_max = physical
+        .last()
+        .map(|extent| extent.physical_offset.saturating_add(extent.length))
+        .unwrap_or(0);
+    let mut gaps = Vec::new();
+    for pair in physical.windows(2) {
+        let left_end = pair[0].physical_offset.saturating_add(pair[0].length);
+        let right_start = pair[1].physical_offset;
+        if right_start > left_end {
+            gaps.push((left_end, right_start - left_end));
+        }
+    }
+    let total_bytes = extents.iter().map(|extent| extent.length).sum::<u64>();
+    let shared_extents = extents
+        .iter()
+        .filter(|extent| extent.flags & FIEMAP_EXTENT_SHARED != 0)
+        .count();
+    let unwritten_extents = extents
+        .iter()
+        .filter(|extent| extent.flags & FIEMAP_EXTENT_UNWRITTEN != 0)
+        .count();
+    let inline_extents = extents
+        .iter()
+        .filter(|extent| extent.flags & FIEMAP_EXTENT_DATA_INLINE != 0)
+        .count();
+    ExtentSummary {
+        total_extents: extents.len(),
+        total_bytes,
+        fragmentation_ratio: extents.len() as f64,
+        physical_range_min,
+        physical_range_max,
+        physical_span_bytes: physical_range_max.saturating_sub(physical_range_min),
+        gaps,
+        shared_extents,
+        unwritten_extents,
+        inline_extents,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn analyze_erase_alignment(
+    extents: &[FilemapExtent],
+    erase_block_size: u64,
+) -> EraseBlockAlignment {
+    let mut extents_aligned = 0;
+    let mut extents_crossing = 0;
+    let mut crossing_details = Vec::new();
+    if erase_block_size == 0 {
+        return EraseBlockAlignment::default();
+    }
+    for extent in extents {
+        let start_block = extent.physical_offset / erase_block_size;
+        let end_block = extent
+            .physical_offset
+            .saturating_add(extent.length.saturating_sub(1))
+            / erase_block_size;
+        let blocks_spanned = end_block.saturating_sub(start_block) + 1;
+        if extent.physical_offset % erase_block_size == 0 && blocks_spanned == 1 {
+            extents_aligned += 1;
+        } else {
+            extents_crossing += 1;
+            crossing_details.push((
+                extent.physical_offset,
+                extent.length,
+                blocks_spanned as usize,
+            ));
+        }
+    }
+    EraseBlockAlignment {
+        erase_block_size,
+        extents_aligned,
+        extents_crossing,
+        crossing_details,
+    }
+}
+
+fn resolve_device_chain(device: &Path) -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut chain = Vec::new();
+        let mut current_names = device
+            .file_name()
+            .map(|value| vec![value.to_string_lossy().to_string()])
+            .unwrap_or_default();
+        while let Some(name) = current_names.pop() {
+            let path = PathBuf::from("/dev").join(&name);
+            if !chain.contains(&path) {
+                chain.push(path.clone());
+            }
+            let slaves_dir = PathBuf::from("/sys/class/block").join(&name).join("slaves");
+            let Ok(entries) = fs::read_dir(&slaves_dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                current_names.push(entry.file_name().to_string_lossy().to_string());
+            }
+        }
+        chain
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = device;
+        Vec::new()
+    }
 }
 
 #[cfg(target_os = "linux")]

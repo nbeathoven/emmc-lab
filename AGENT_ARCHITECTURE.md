@@ -1,7 +1,7 @@
 # emmc-lab: Storage Subsystem Expansion — Architecture & Agent Instructions
 
 > **Audience**: AI coding agent with Rust expertise, tasked with implementing new subsystems in `emmc-lab`.
-> **Codebase version**: 0.2.8 — 13k lines of Rust across 16 modules.
+> **Codebase version**: 0.2.9 — 13k lines of Rust across 16 modules.
 > **License**: MIT. **Target**: Linux only (eMMC and file-backed block devices).
 
 ---
