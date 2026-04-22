@@ -1,0 +1,72 @@
+name: boot-read-userpart-write
+
+target:
+  mode: raw_device
+  path: /dev/mmcblk0p2
+
+secondary_targets:
+  - target:
+      mode: raw_device
+      path: /dev/mmcblk0boot0
+    workload:
+      test_type: read
+      block_size_bytes: 512
+      queue_depth: 1
+    addressing:
+      mode: sector_range
+      start_sector: 0
+      sector_count: 8192
+      start_offset_bytes:
+      range_size_bytes:
+    worker_count: 1
+
+workload:
+  test_type: write
+  block_size_bytes: 204800
+  worker_count: 1
+  queue_depth: 1
+  exact_op_count: 1500000
+
+addressing:
+  mode: byte_range
+  start_sector:
+  sector_count:
+  start_offset_bytes: 0
+  range_size_bytes: 1073741824
+
+durability:
+  mode: performance
+  fdatasync_at_end: true
+
+verification:
+  enabled: false
+
+telemetry:
+  health_telemetry: true
+
+diagnostics:
+  capture_during_test: false
+  deep_trace: false
+  sample_interval_ms: 1000
+
+reporting:
+  export_json: true
+  export_csv: true
+  export_html: true
+  notes: []
+
+integrity:
+  - device: /dev/mmcblk0boot0
+    offset_bytes: 0
+    length_bytes: 4194304
+    algorithm: md5
+    capture_before_run: true
+
+checkpointing:
+  enabled: true
+  every_n_iterations: 500
+
+safety:
+  destructive_confirmation_required: true
+  confirmation_flag: false
+  allow_boot_partition_write: false

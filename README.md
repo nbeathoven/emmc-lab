@@ -9,7 +9,7 @@
 - JSON, CSV, and HTML reporting
 - an SSH-friendly interactive menu plus direct automation commands
 
-Current release: `v0.2.6`
+Current release: `v0.2.8`
 
 License: [MIT](LICENSE)
 
@@ -57,6 +57,8 @@ Diagnostic mode works in two levels:
 - separate logical syscall bytes and storage-layer bytes in diagnostics
 - best-effort `fdinfo`-backed file context and unattributed device-I/O totals in diagnostics
 - health snapshots with direct EXT_CSD parsing and graceful `mmc-utils` fallback when raw access is unavailable
+- decoded eMMC CID identity capture in health snapshots and saved reports
+- boot-partition sector verification for concurrent boot-read/user-partition-write stress runs
 - lightweight persistence without an external database
 - optional embedded SQLite feature flag
 - Debian-family self-deploy installer, including Raspberry Pi OS
@@ -109,6 +111,8 @@ The interactive menu now groups workload entry under `Run Workload`, with:
 - `Guided Custom Run`
 - `Saved Profiles`
 - `Repeat Last Run`
+
+The quick preset list includes `Concurrent Partition Stress` for platforms where boot-partition reads and user-partition writes need to be exercised together. It reads a selected boot partition range, writes a selected non-root user partition, captures CID and health before/after, and compares an md5 checksum of the boot range after the run.
 
 The managed console uses a small fixed key vocabulary throughout:
 
@@ -318,7 +322,7 @@ If an optional feature is unavailable, `emmc-lab` reports that clearly and falls
 
 ## Versioning and Releases
 
-- Crate version: `0.2.6`
+- Crate version: `0.2.8`
 - License: `MIT`
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - GitHub releases: [Releases](https://github.com/nbeathoven/emmc-lab/releases)

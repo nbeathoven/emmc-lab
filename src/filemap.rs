@@ -68,11 +68,16 @@ fn collect_file_map_linux(file: &Path, device_override: Option<&Path>) -> Result
         bail!("refusing to FIEMAP a symlink: {}", file.display());
     }
 
+    // Resolve the mounted block device once up front so the report can be tied back
+    // to a concrete partition or whole-disk node.
     let mount = resolve_mount_for_file(file)?;
     let device = device_override
         .map(Path::to_path_buf)
         .unwrap_or_else(|| mount.device.clone());
     let file_handle = open_nofollow(file)?;
+
+    // FIEMAP is the normal fast path. FIBMAP is only here for older filesystems and
+    // kernels that still reject FIEMAP but can answer block-by-block queries.
     let (extents, method) = match fiemap_extents(&file_handle) {
         Ok(extents) => (extents, "fiemap".to_string()),
         Err(fiemap_err) => match fibmap_extents(&file_handle) {
@@ -331,6 +336,9 @@ fn block_device_sector_size(device: &Path) -> Result<u64> {
         .file_name()
         .map(|value| value.to_string_lossy().to_string())
     {
+        // Partition nodes often inherit queue settings from the parent disk in sysfs.
+        // Read sysfs first so ordinary users do not need raw-device open permission
+        // just to compute LBAs for a file report.
         for candidate in [Some(name.clone()), parent_block_name(&name)] {
             let Some(candidate) = candidate else {
                 continue;

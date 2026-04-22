@@ -4,6 +4,8 @@ use std::fmt::{Display, Formatter};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::integrity::ChecksumAlgorithm;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetMode {
@@ -80,17 +82,29 @@ pub struct TargetConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkloadConfig {
     pub test_type: WorkloadType,
+    #[serde(default = "default_block_size_bytes")]
     pub block_size_bytes: usize,
+    #[serde(default)]
     pub runtime_seconds: Option<u64>,
+    #[serde(default)]
     pub exact_op_count: Option<u64>,
+    #[serde(default = "default_queue_depth")]
     pub queue_depth: u32,
+    #[serde(default = "default_worker_count")]
     pub worker_count: usize,
+    #[serde(default = "default_read_percentage")]
     pub read_percentage: u8,
+    #[serde(default = "default_random_seed")]
     pub random_seed: u64,
+    #[serde(default)]
     pub direct_io: bool,
+    #[serde(default)]
     pub verify: bool,
+    #[serde(default = "default_sync_cadence_writes")]
     pub sync_cadence_writes: Option<u64>,
+    #[serde(default = "default_sync_cadence_ms")]
     pub sync_cadence_ms: Option<u64>,
+    #[serde(default = "default_report_interval_ms")]
     pub report_interval_ms: u64,
 }
 
@@ -126,6 +140,12 @@ pub struct DiagnosticsConfig {
     pub sample_interval_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct CheckpointConfig {
+    pub enabled: bool,
+    pub every_n_iterations: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReportingConfig {
     pub export_json: bool,
@@ -138,6 +158,27 @@ pub struct ReportingConfig {
 pub struct SafetyConfig {
     pub destructive_confirmation_required: bool,
     pub confirmation_flag: bool,
+    #[serde(default)]
+    pub allow_boot_partition_write: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IntegrityRegionConfig {
+    pub device: PathBuf,
+    pub offset_bytes: u64,
+    pub length_bytes: u64,
+    pub algorithm: ChecksumAlgorithm,
+    pub capture_before_run: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SecondaryTarget {
+    pub target: TargetConfig,
+    pub workload: WorkloadConfig,
+    #[serde(default = "default_addressing_config")]
+    pub addressing: AddressingConfig,
+    #[serde(default = "default_worker_count")]
+    pub worker_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,6 +187,12 @@ pub struct Profile {
     #[serde(default)]
     pub description: Option<String>,
     pub target: TargetConfig,
+    #[serde(default)]
+    pub secondary_targets: Vec<SecondaryTarget>,
+    #[serde(default)]
+    pub integrity: Vec<IntegrityRegionConfig>,
+    #[serde(default)]
+    pub checkpointing: CheckpointConfig,
     pub workload: WorkloadConfig,
     pub addressing: AddressingConfig,
     pub durability: DurabilityConfig,
@@ -173,6 +220,9 @@ impl Profile {
                 path: PathBuf::from("/tmp/emmc-lab.bin"),
                 create_if_missing_size_bytes: Some(1024 * 1024 * 1024),
             },
+            secondary_targets: Vec::new(),
+            integrity: Vec::new(),
+            checkpointing: CheckpointConfig::default(),
             workload: WorkloadConfig {
                 test_type: WorkloadType::RandRead,
                 block_size_bytes: 4096,
@@ -217,6 +267,7 @@ impl Profile {
             safety: SafetyConfig {
                 destructive_confirmation_required: true,
                 confirmation_flag: false,
+                allow_boot_partition_write: false,
             },
         }
     }
@@ -269,23 +320,25 @@ impl Profile {
         if self.workload.block_size_bytes == 0 {
             bail!("block_size_bytes must be > 0");
         }
-        if self.workload.queue_depth == 0 {
-            bail!("queue_depth must be > 0");
-        }
-        if self.workload.worker_count == 0 {
-            bail!("worker_count must be > 0");
-        }
-        if self.workload.read_percentage > 100 {
-            bail!("read_percentage must be <= 100");
-        }
-        match (
-            self.workload.runtime_seconds,
-            self.workload.exact_op_count,
-            self.stop_condition(),
-        ) {
-            (Some(_), None, StopCondition::RuntimeSeconds) => {}
-            (None, Some(count), StopCondition::ExactOperationCount) if count > 0 => {}
-            _ => bail!("exactly one stop condition must be configured"),
+        validate_workload_config(&self.workload, true)?;
+        for secondary in &self.secondary_targets {
+            if secondary.target.path.as_os_str().is_empty() {
+                bail!("secondary target path cannot be empty");
+            }
+            if secondary.target.create_if_missing_size_bytes == Some(0) {
+                bail!("secondary create_if_missing_size_bytes must be > 0 when configured");
+            }
+            if secondary.target.mode == TargetMode::RawDevice
+                && secondary.target.create_if_missing_size_bytes.is_some()
+            {
+                bail!(
+                    "secondary create_if_missing_size_bytes is only valid for file-based targets"
+                );
+            }
+            validate_workload_config(&secondary.workload, false)?;
+            if secondary.worker_count == 0 {
+                bail!("secondary worker_count must be > 0");
+            }
         }
         match self.addressing.mode {
             AddressingMode::WholeSelectedRange => {}
@@ -461,6 +514,78 @@ impl Profile {
     }
 }
 
+fn validate_workload_config(workload: &WorkloadConfig, require_stop_condition: bool) -> Result<()> {
+    if workload.queue_depth == 0 {
+        bail!("queue_depth must be > 0");
+    }
+    if workload.worker_count == 0 {
+        bail!("worker_count must be > 0");
+    }
+    if workload.read_percentage > 100 {
+        bail!("read_percentage must be <= 100");
+    }
+    if require_stop_condition {
+        match (
+            workload.runtime_seconds,
+            workload.exact_op_count,
+            if workload.exact_op_count.is_some() {
+                StopCondition::ExactOperationCount
+            } else {
+                StopCondition::RuntimeSeconds
+            },
+        ) {
+            (Some(_), None, StopCondition::RuntimeSeconds) => {}
+            (None, Some(count), StopCondition::ExactOperationCount) if count > 0 => {}
+            _ => bail!("exactly one stop condition must be configured"),
+        }
+    } else if workload.exact_op_count == Some(0) {
+        bail!("secondary exact_op_count must be > 0 when configured");
+    }
+    Ok(())
+}
+
+fn default_block_size_bytes() -> usize {
+    4096
+}
+
+pub(crate) fn default_worker_count() -> usize {
+    1
+}
+
+fn default_queue_depth() -> u32 {
+    1
+}
+
+fn default_read_percentage() -> u8 {
+    70
+}
+
+fn default_random_seed() -> u64 {
+    1
+}
+
+fn default_addressing_config() -> AddressingConfig {
+    AddressingConfig {
+        mode: AddressingMode::WholeSelectedRange,
+        start_sector: None,
+        sector_count: None,
+        start_offset_bytes: Some(0),
+        range_size_bytes: None,
+    }
+}
+
+fn default_sync_cadence_writes() -> Option<u64> {
+    Some(1024)
+}
+
+fn default_sync_cadence_ms() -> Option<u64> {
+    Some(1000)
+}
+
+fn default_report_interval_ms() -> u64 {
+    1000
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -512,6 +637,7 @@ reporting:
 safety:
   destructive_confirmation_required: true
   confirmation_flag: false
+  allow_boot_partition_write: false
 "#;
         let profile: Profile = serde_yaml::from_str(yaml).expect("yaml");
         profile.validate().expect("valid");

@@ -1,4 +1,4 @@
-use crate::system::DoctorCheck;
+use crate::system::{DoctorCheck, DoctorStatus};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::ops::Range;
@@ -89,16 +89,21 @@ pub fn capture_lba_trace(opts: LbaTraceOptions) -> Result<LbaTraceReport> {
 #[cfg(target_os = "linux")]
 fn capture_lba_trace_linux(opts: LbaTraceOptions) -> Result<LbaTraceReport> {
     let check = blktrace_debugfs_available(&opts.device)?;
-    if !check.ok {
+    if check.status != DoctorStatus::Pass {
         bail!("{}", check.detail);
     }
     if !command_exists("blkparse") {
         bail!("blkparse is not installed");
     }
 
+    // Build the ownership index once before capture starts so each traced LBA can be
+    // matched against the current file layout without re-running FIEMAP per event.
     let owner_index = build_lba_owner_index(&opts.map_files)?;
     let device_quoted = shell_single_quote(&opts.device);
     let duration = opts.duration_secs.max(1);
+
+    // This is deliberately a CLI-backed first pass. The format string keeps the output
+    // small and stable enough to parse without pretending we already have a relay reader.
     let command = format!(
         "blktrace -d {device_quoted} -w {duration} -o - 2>/dev/null | blkparse -q -i - -f '%T %t %a %d %S %n\\n'"
     );
@@ -212,7 +217,11 @@ pub fn blktrace_debugfs_available(device: &str) -> Result<DoctorCheck> {
         };
         Ok(DoctorCheck {
             name: "blktrace_debugfs".to_string(),
-            ok: has_blktrace && has_blkparse && debug_root.join(&device_name).exists(),
+            status: if has_blktrace && has_blkparse && debug_root.join(&device_name).exists() {
+                DoctorStatus::Pass
+            } else {
+                DoctorStatus::Warn
+            },
             detail,
         })
     }
@@ -221,7 +230,7 @@ pub fn blktrace_debugfs_available(device: &str) -> Result<DoctorCheck> {
         let _ = device;
         Ok(DoctorCheck {
             name: "blktrace_debugfs".to_string(),
-            ok: false,
+            status: DoctorStatus::Fail,
             detail: "lba-trace is Linux-only".to_string(),
         })
     }

@@ -2,6 +2,15 @@
 
 All notable changes to `emmc-lab` are documented in this file.
 
+## v0.2.8 - 2026-04-21
+
+- decoded the eMMC CID register in every health snapshot so reports now show manufacturer ID, product name, serial number, and manufacturing date instead of only raw sysfs strings
+- added the `Concurrent Partition Stress` quick preset for reading boot-partition sectors while writing a selected user partition on the same eMMC device
+- added automatic md5 before/after verification for configured integrity regions, with boot-sector verification shown in terminal, JSON, CSV, and HTML reports
+- preserved integrity baseline snapshots in the session directory and preserved post-run snapshots when a mismatch is detected for offline comparison
+- let secondary workload streams use their own addressing range, which is required for boot-read plus user-partition-write stress profiles
+- added regression coverage for CID decoding, concurrent stress profile wiring, and automatic integrity verification
+
 ## v0.2.6 - 2026-04-14
 
 - added block geometry collection and rendering for device inventory and doctor output
