@@ -110,32 +110,44 @@ pub fn run_menu(paths: &AppPaths) -> Result<()> {
     loop {
         let items = vec![
             MenuItem {
-                columns: vec!["Run Workload".to_string(), "presets, wizard, saved, repeat".to_string()],
+                columns: vec![
+                    "Run Workload".to_string(),
+                    "presets, wizard, saved, repeat".to_string(),
+                ],
                 detail: "Open: presets, wizard, saved, repeat".to_string(),
             },
             MenuItem {
-                columns: vec!["Diagnostics".to_string(), "live monitor, capture, deep trace".to_string()],
-                detail: "Scope: local diagnostics. Risk: read-only sampling unless you choose deeper tracing support. Launch the live monitor, save a timed capture, or try deep trace with fallback guidance.".to_string(),
+                columns: vec![
+                    "Diagnostics".to_string(),
+                    "live monitor, capture, deep trace".to_string(),
+                ],
+                detail: "Open: monitor, sample, trace".to_string(),
             },
             MenuItem {
-                columns: vec!["Device Health".to_string(), "mmc health and host snapshot".to_string()],
-                detail: "Scope: selected block device. Risk: read-only. Inspect eMMC health and system context for a selected block device.".to_string(),
+                columns: vec![
+                    "Device Health".to_string(),
+                    "mmc health and host snapshot".to_string(),
+                ],
+                detail: "View: eMMC health and host state".to_string(),
             },
             MenuItem {
                 columns: vec!["Reports".to_string(), "view or export sessions".to_string()],
-                detail: "Scope: saved session data. Risk: viewing is read-only, export writes local files, and delete removes saved data. Browse saved sessions and export JSON, CSV, or HTML reports.".to_string(),
+                detail: "Open: saved sessions, exports, delete".to_string(),
             },
             MenuItem {
                 columns: vec!["Settings".to_string(), "paths and capabilities".to_string()],
-                detail: "Scope: local environment. Risk: read-only. Show application paths, system defaults, and capability checks.".to_string(),
+                detail: "View: paths, devices, capabilities".to_string(),
             },
             MenuItem {
-                columns: vec!["Help".to_string(), "commands and workflow notes".to_string()],
-                detail: "Scope: operator guidance. Risk: read-only. Show built-in CLI usage examples and workflow notes.".to_string(),
+                columns: vec![
+                    "Help".to_string(),
+                    "commands and workflow notes".to_string(),
+                ],
+                detail: "View: commands and workflow notes".to_string(),
             },
             MenuItem {
                 columns: vec!["Exit".to_string(), "leave emmc-lab".to_string()],
-                detail: "Scope: current console session. Risk: none. Return to the shell.".to_string(),
+                detail: "Exit: return to shell".to_string(),
             },
         ];
         let Some(choice) = select_from_menu(
